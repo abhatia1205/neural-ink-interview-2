@@ -1,0 +1,136 @@
+use interface::{RobotError, RobotState, OCTService, OCTError, }; //OCTError;
+use std::time::{Duration, Instant};
+
+const CALIBRATION_SAMPLES: u64 = 1_000;
+const MAX_ESTIMATE_SAMPLES: u64 = 500;
+
+enum ControllerState {
+    Dead,
+    OutOfBrainUncalibrated,
+    OutOfBrainCalibrated,
+    InBrain
+}
+
+enum ControllerSubstate {
+    Localizing,
+    Purgatory,
+    Normal,
+    Panic
+}
+
+pub struct Controller {
+    current_state: ControllerState,
+    current_substate: ControllerSubstate,
+    oct_queue: Vec<Result<u64, OCTError>>,
+    robot_queue: Vec<Result<RobotState, RobotError>>,
+    robot: Box<dyn Robot>,
+    oct_robot: Box<dyn OCTService>,
+    last_position: RobotState,
+    last_position_time: Duration,
+    last_oct_depth: u64,
+    last_oct_depth_time: Duration,
+
+
+}
+
+impl Controller {
+    pub fn new() -> Controller {
+        Controller {
+            current_state: ControllerState::Reset,
+            current_substate: ControllerSubstate::Normal,
+            oct_queue: Vec::new(),
+            robot_queue: Vec::new(),
+            robot: Box::new(RobotArm),
+            oct_robot: Box::new(OCT),
+            last_position: RobotState {
+                inserter_z: 0,
+                needle_z: 0,
+            },
+            last_position_time: Instant::now(),
+            last_oct_depth: 7_000_000,
+            last_oct_depth_time: Instant::now(),
+        }
+    }
+
+    fn in_brain(&self) -> bool {
+        self.current_state == ControllerState::InBrain
+    }
+
+    async fn robot_listener(&mut self) {
+        loop {
+            //start timer
+            let robot_state = self.robot.get_current_state().await;
+            self.robot_queue.push(robot_state);
+            match robot_state {
+                Ok(state) => {
+                    self.last_position = robot_state;
+                    self.last_position_time = Instant::now();
+                    self.controller_substate = ControllerSubstate::Normal;
+                }
+                RobotError(e) => {
+                    self.robot_queue.push(Err(e));
+                    if(self.in_brain()) {
+                        
+                    }
+                }
+            }
+        }
+    }
+
+    async fn oct_listener(&mut self) {
+        loop {
+            let oct_distance = self.oct_robot.get_surface_distance().await;
+
+            match oct_distance {
+                Ok(distance) => {
+                    self.oct_queue.push(distance
+                }
+            }
+        }
+    }
+
+    fn predict_position(&self) -> RobotState {
+        None
+    }
+
+    fn update_position(&mut self) {}
+
+    async fn calibrate(&mut self) {}
+
+    fn predict_oct(&self) {}
+
+    fn update_oct(&mut self) {}
+
+    async fn move_to_position(&mut self, position: RobotState, next_state: ControllerState, next_substate: ControllerSubstate) -> (ControllerState, ControllerSubstate) {}
+
+    async fn panic(&mut self) {
+        loop{
+            let mv = self.robot.commad_move(Move::NeedleZ(0)).await;
+            if(mv.is_ok()){
+                break;
+            }
+        }
+        let current_time = Instant::now();
+        while(self.last_position.needle_z != 0 || self.last_position_time < current_time){
+            tokio::yield_now().await;
+        }
+        self.current_state = ControllerState::OutOfBrainCalibrated;
+        self.current_substate = ControllerSubstate::Normal;
+    }
+
+    async fn purgatory(&mut self, expected_position) {
+        let current_time = Instant::now();
+
+    }
+
+    fn transition_state(&mut self, next_state: ControllerState, next_substate: ControllerSubstate) {
+        if(self.current_substate != ControllerSubstate::Panic){
+            current_state = next_state;
+            current_substate = next_substate;
+        }
+    }
+
+
+
+}
+
