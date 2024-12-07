@@ -4,7 +4,7 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::robot_chat::RobotArm;
 // use core::num;
 // use std::os::macos::raw::stat;
-use std::sync::{Arc, Mutex}; //Arc;
+use std::sync::{Mutex,Arc}; //Arc;
 use std::collections::VecDeque;
 
 const CALIBRATION_SAMPLES: u64 = 1_000;
@@ -43,18 +43,18 @@ pub struct Controller {
     distance_time_queue: Mutex<VecDeque<Instant>>,
     robot_queue: Mutex<VecDeque<Result<RobotState, RobotError>>>, //VecDeque<(Result<RobotState, RobotError>, Instant>>>,
     robot_time_queue: Mutex<VecDeque<Instant>>,
-    robot: Arc<RobotArm>, //Box<RobotArm>,
+    robot: tokio::sync::Mutex<RobotArm>, //Box<RobotArm>,
     consecutive_errors: Mutex<u64>,
     pre_move_location: Mutex<Option<u64>>, //u64
 }
 
-impl Controller {
+impl<'a> Controller{
     pub fn new() -> Controller {
         Controller {
             current_state: Mutex::new(ControllerState::Dead), //ControllerState::Dead,
             distance_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
             robot_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
-            robot: Arc::new(RobotArm::new()),
+            robot: tokio::sync::Mutex::new(RobotArm::new()),
             distance_time_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
             robot_time_queue: Mutex::new(VecDeque::new()),
             consecutive_errors: Mutex::new(0),
@@ -169,7 +169,12 @@ async fn poll_surface_distance(control_state: Arc<Controller>, tx: mpsc::Sender<
         println!("Polling: Calling get_distance...");
         let tx_clone = tx.clone();
         // Spawn a task to fetch the distance without blocking the polling loop
-        let distance = control_state.robot.get_surface_distance().await;
+        let distance = {
+            //let guard = control_state.robot.lock().unwrap();
+            let guard: tokio::sync::MutexGuard<'_, RobotArm> = control_state.robot.lock().await;
+            guard.get_surface_distance().await
+        };
+        //let distance = control_state.robot.get_surface_distance().await;
         tokio::spawn({ 
             async move {
             match distance {
@@ -237,7 +242,9 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
 
 async fn process_robot_state(control_state: Arc<Controller>) {
     loop{
-        let robot_state = control_state.robot.get_robot_state().await;
+       // let robot_state = control_state.robot.lock().unwrap().get_robot_state().await;
+        //let robot_state = control_state.robot.get_robot_state().await;
+        let robot_state = control_state.robot.lock().await.get_robot_state().await;
         match robot_state {
             Ok(state) => {
                 println!("Processing robot state: {:?}", state);
@@ -324,7 +331,10 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
             tokio::task::yield_now().await;
             continue;
         };
-        let response = control_state.robot.command_move(&Move::NeedleZ(relative_position)).await;
+        let response = {
+            //control_state.robot.lock().unwrap().command_move(&Move::NeedleZ(relative_position)).await
+            control_state.robot.lock().await.command_move(&Move::NeedleZ(relative_position)).await
+        };
         match response {
             Ok(_) => {
                 println!("Moved to position: {}", relative_position);
@@ -350,7 +360,10 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
 
 async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: ControllerState, from_panic: bool) -> () {
     loop {
-        let response = {control_state.robot.lock().unwrap().command_move(command).await};
+        let response = {
+            //control_state.robot.lock().unwrap().command_move(command).await
+            control_state.robot.lock().await.command_move(command).await
+        };
         match response {
             Ok(_) => {
                 println!("Moved to position: {}", command);

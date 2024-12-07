@@ -22,7 +22,6 @@ pub struct RobotArm{
 
 impl RobotArm{
     pub fn new() -> RobotArm{
-        let robot_mutable_state = RobotArmState{};
         RobotArm{
             distance_errors: false,
             state_errors: false,
@@ -37,8 +36,10 @@ impl RobotArm{
 
 impl OCTService for RobotArm{
     async fn get_surface_distance(&self) -> Result<u64, OCTError>{
-        let mut rng = rand::thread_rng();
-        let probability: f64 = rng.gen(); // Generate a random float between 0.0 and 1.0
+        let probability: f64 = {
+            let mut rng = rand::thread_rng();
+            rng.gen()
+        };
         let brain_position = (self.brain_location_fn)(self.init_time.elapsed().as_millis() as u64);
         sleep(Duration::from_millis(15)).await;
         if probability < 0.1 && self.distance_errors {
