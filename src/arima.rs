@@ -1,9 +1,7 @@
 use nalgebra::{DMatrix, DVector};
-use crate::interface::{OCTError};
+use crate::interface::OCTError;
 use std::collections::VecDeque;
 extern crate approx;
-use rand::Rng;
-
 
 const MIN_NUM_POINTS: u64 = 8;
 
@@ -88,7 +86,7 @@ impl ARIMA{
 #[cfg(test)]
 mod tests {
     use approx::assert_relative_eq;
-
+    use rand::Rng;
     use super::*;
 
     // Testing ARIMA with initial states 1,2 and equation x[i] = 0.6*x[i-1] + 0.3*x[i-2] + 1

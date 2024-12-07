@@ -1,13 +1,12 @@
-use tokio::main;
-
 mod interface;
 mod controller;
-mod robot;
+//mod robot;
+mod robot_chat;
 mod arima;
 use interface::RobotState;
 use std::sync::Arc;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!("Hello, world!");
     let trial = RobotState{
@@ -16,5 +15,5 @@ async fn main() {
     };
     println!("{:?}", trial);
     let controller = controller::Controller::new();
-    controller::start(Arc::new(controller)).await;
+    controller::start(Arc::new(controller), &(1..=100).collect()).await;
 }

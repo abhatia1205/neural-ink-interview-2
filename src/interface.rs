@@ -22,7 +22,7 @@ pub trait OCTService {
     async fn get_surface_distance(&self) -> Result<u64, OCTError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Move {
     InserterZ(u64), // desired absolute position in nm
     NeedleZ(u64),   // desired absolute position in nm
