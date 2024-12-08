@@ -9,31 +9,37 @@ const MIN_NUM_POINTS: u64 = 8;
 pub struct ArimaError{}
 
 
-struct ARIMA{
+pub struct ARIMA{
     l1_coef: f64,
     l2_coef: f64,
     constant: f64,
-    trained: bool
+    trained: bool,
+    min_num_points: u64
 }
 
 impl ARIMA{
-    fn new() -> ARIMA{
+    pub fn new(min_num_points: u64) -> ARIMA{
         ARIMA{
             l1_coef: 0.0,
             l2_coef: 0.0,
             constant: 0.0,
-            trained: false
+            trained: false,
+            min_num_points: min_num_points
         }
     }
 
-    fn predict (&self, lag1: f64, lag2: f64) -> Result<f64, ArimaError>{
+    pub fn is_trained(&self) -> bool{
+        self.trained
+    }
+
+    pub fn predict (&self, lag1: f64, lag2: f64) -> Result<f64, ArimaError>{
         if !self.trained{
             return Err(ArimaError{});
         }
         Ok(self.l1_coef * lag1 + self.l2_coef * lag2 + self.constant)
     }
 
-    fn train(&mut self, vec_deque: &VecDeque<Result<f64, OCTError>>) -> bool {
+    pub fn train(&mut self, vec_deque: &VecDeque<Result<f64, OCTError>>) -> bool {
         let data = Vec::from(vec_deque.clone());
         let mut x_rows = Vec::new();
         let mut y_rows = Vec::new();
@@ -62,6 +68,7 @@ impl ARIMA{
         let y_matrix = DVector::from_vec(y_rows);
 
         println!("X matrix: {}", x_matrix);
+        println!("Y matrix: {}", y_matrix);
 
         let xt_x = x_matrix.transpose() * x_matrix.clone();
 
@@ -81,6 +88,11 @@ impl ARIMA{
             return false;
         }
     }
+
+    pub fn train_u64(&mut self, deque: &VecDeque<Result<u64, OCTError>>) -> bool {
+        let temp = deque.into_iter().map(|x| if x.is_err() {Err(x.clone().unwrap_err())} else {Ok(x.clone().unwrap() as f64)}).collect();
+        return self.train(&temp);
+    }
 }
 
 #[cfg(test)]
@@ -92,7 +104,7 @@ mod tests {
     // Testing ARIMA with initial states 1,2 and equation x[i] = 0.6*x[i-1] + 0.3*x[i-2] + 1
     #[test]
     fn test_arima() {
-        let mut arima = ARIMA::new();
+        let mut arima = ARIMA::new(MIN_NUM_POINTS);
         let mut deque: VecDeque<f64> = VecDeque::new();
         deque.push_back(1.0);
         deque.push_back(2.0);
@@ -111,7 +123,7 @@ mod tests {
     // Testing ARIMA with initial states 1,2 and equation x[i] = 0.6*x[i-1] + 0.3*x[i-2] + 1
     #[test]
     fn test_arima_with_errors() {
-        let mut arima = ARIMA::new();
+        let mut arima = ARIMA::new(MIN_NUM_POINTS);
         let mut deque: VecDeque<f64> = VecDeque::new();
         deque.push_back(1.0);
         deque.push_back(2.0);
@@ -120,7 +132,7 @@ mod tests {
         }
         let deque = deque.iter().map(|x| {
             let probability: f64 = rand::thread_rng().gen();
-            if probability < 0.3 { Err(OCTError::AcquisitionError { msg: "Acquisition error".to_string() }) } else { Ok(*x)}
+            if probability < 0.3 { Err(OCTError::AcquisitionError { msg: "Acquisition error".to_string() }) } else { Ok(*x) }
         }).collect();
         let result = arima.train(&deque);
         assert_eq!(result, true);

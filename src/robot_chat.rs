@@ -58,8 +58,8 @@ impl RobotArm {
             init_time: Instant::now(),
             brain_location_fn: |x: u64| {
                 (7_000_000.0
-                    + 2_000_000.0 * (6.0 * x as f64).sin()
-                    + 3_000_000.0 * (x as f64).sin()) as u64
+                    + 500_000.0 * (6.0 * x as f64/1000.0).sin()
+                    + 1_000_000.0 * (x as f64/1000.0).sin()) as u64
             },
             inner: Mutex::new(RobotArmStateMutable::new(0)),
         }
@@ -165,14 +165,16 @@ impl OCTService for RobotArm {
         let probability: f64 = { let mut rng = rand::thread_rng();
             rng.gen()
         };
+        let robot_position = self.get_robot_state().await.unwrap().inserter_z;
         let brain_position = (self.brain_location_fn)(self.init_time.elapsed().as_millis() as u64);
+        assert!(brain_position > 0 && brain_position > robot_position, "brain position: {}, robot position: {}", brain_position, robot_position);
         sleep(Duration::from_millis(15)).await;
         if probability < 0.1 && self.distance_errors {
             Err(OCTError::CommunicationError {
                 msg: "Connection error".to_string(),
             })
         } else {
-            Ok(brain_position)
+            Ok(brain_position - robot_position)
         }
     }
 }
