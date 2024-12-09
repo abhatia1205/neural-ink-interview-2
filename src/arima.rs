@@ -44,7 +44,8 @@ impl ARIMA{
         let mut x_rows = Vec::new();
         let mut y_rows = Vec::new();
 
-        if data.len() < MIN_NUM_POINTS as usize {
+        if data.len() < self.min_num_points as usize {
+            println!("Not enough data points: {}", data.len());
             return false;
         }
     
@@ -56,20 +57,12 @@ impl ARIMA{
             }
         }
 
-        if x_rows.len() < MIN_NUM_POINTS as usize {
+        if x_rows.len() < self.min_num_points as usize {
             println!("Not enough data points: {}", x_rows.len());
             return false;
         }
-        // Create X and Y matrices
-        for i in 0..x_rows.len() {
-            print!("{} {} {} ", x_rows[i][0], x_rows[i][1], x_rows[i][2]);
-        }
         let x_matrix = DMatrix::from_vec(3, x_rows.len(), x_rows.concat()).transpose();
         let y_matrix = DVector::from_vec(y_rows);
-
-        println!("X matrix: {}", x_matrix);
-        println!("Y matrix: {}", y_matrix);
-
         let xt_x = x_matrix.transpose() * x_matrix.clone();
 
         // Compute X^T * y
@@ -77,7 +70,6 @@ impl ARIMA{
 
         if let Some(xt_x_inv) = xt_x.try_inverse() {
             let weights = xt_x_inv * xt_y;
-            println!("weights: {}", weights);
             self.l1_coef = weights[0];
             self.l2_coef = weights[1];
             self.constant = weights[2];

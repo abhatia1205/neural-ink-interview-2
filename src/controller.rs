@@ -1,7 +1,8 @@
 use crate::interface::{RobotError, RobotState, OCTService, OCTError, Move, Robot}; //OCTError;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration, Instant};
 use crate::robot_chat::RobotArm;
+use core::time;
 use std::f32::MIN;
 // use core::num;
 // use std::os::macos::raw::stat;
@@ -10,7 +11,7 @@ use std::collections::VecDeque;
 use crate::arima::ARIMA;
 
 const CALIBRATION_SAMPLES: u64 = 500;
-const MIN_CALIBRATION_TRAINING_POINTS: u64 = 600;
+const MIN_CALIBRATION_TRAINING_POINTS: u64 = CALIBRATION_SAMPLES/2;
 const MIN_DISTANCE_BRAIN_TO_ARM_NM: u64 = 200_000;
 const MAX_DISTANCES: u64 = 100;
 const MAX_STATES: u64 = 100;
@@ -20,7 +21,9 @@ const MAX_IB_TIME: u64 = 1_000;
 const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 5;
 // const MAX_BRAIN_ACC_FOR_CONST_NM_S2: u64 = 1_000_000*100;
 // const HARDCODED_PRE_MOVE_LOCATION: u64 = 3_000_000; //TODO
-const MAX_PREDICTION_ERROR_NM: u64 = 1_000_000;
+const MAX_PREDICTION_ERROR_NM: u64 = 20_000;
+const MAX_BRAIN_VEL_NM_S: u64 = 10_000;
+const MAX_TIME_TO_REACH_DEPTH: u64 = 150;
 
 const OCT_POLL_MILLIS: u64 = 5;
 const OCT_LATENCY_MEAN: u64 = 15;
@@ -58,24 +61,30 @@ pub struct Controller {
     distance_time_queue: Mutex<VecDeque<Instant>>,
     robot_queue: Mutex<VecDeque<Result<RobotState, RobotError>>>, //VecDeque<(Result<RobotState, RobotError>, Instant>>>,
     robot_time_queue: Mutex<VecDeque<Instant>>,
-    robot: tokio::sync::Mutex<RobotArm>, //Box<RobotArm>,
     consecutive_errors: Mutex<u64>,
     pre_move_location: Mutex<Option<u64>>, //u64
     arima: Mutex<Option<ARIMA>>, //ARIMA>
+    pub distance_tx: mpsc::Sender<((), oneshot::Sender<Result<u64, OCTError>>)>,
+    pub state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>, //mpsc::Sender<()>,
+    pub move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>, //mpsc::Sender<Move>,
 }
 
-impl<'a> Controller{
-    pub fn new() -> Controller {
+impl Controller{
+    pub fn new(distance_tx: mpsc::Sender<((), oneshot::Sender<Result<u64, OCTError>>)>,
+            state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>,
+            move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>) -> Controller {
         Controller {
             current_state: Mutex::new(ControllerState::Dead), //ControllerState::Dead,
             distance_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
             robot_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
-            robot: tokio::sync::Mutex::new(RobotArm::new()),
             distance_time_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
             robot_time_queue: Mutex::new(VecDeque::new()),
             consecutive_errors: Mutex::new(0),
             pre_move_location: Mutex::new(None),
             arima: Mutex::new(None),
+            distance_tx,
+            state_tx,
+            move_tx
         }
     }
 
@@ -141,18 +150,24 @@ impl<'a> Controller{
             return None;
         }
         let latency ={(*self.distance_time_queue.lock().unwrap().back().unwrap() - *self.robot_time_queue.lock().unwrap().front().unwrap()).as_millis() as f64/self.distance_queue.lock().unwrap().len() as f64};
-        //assert!(location.inserter_z < brain_current.clone().unwrap(), "{} {}", location.inserter_z, brain_current.clone().unwrap());
-        //let needle_location = location.needle_z + location.inserter_z;
+        if latency >15.0{
+            return None;
+        }
         let brain_current = brain_current.unwrap() + commanded_depth;
         let brain_next = brain_next.unwrap() + commanded_depth;
         let brain_v = (brain_next as f64 - brain_current as f64) / latency as f64; // in nm/ms
+        if brain_v.abs() > MAX_BRAIN_VEL_NM_S as f64 {
+            return None;
+        }
         let position_indicator = if location.needle_z < brain_current {1.0} else {-1.0};
         let brain_acceleration = NEEDLE_ACCELERATION_NM_MS as f64 * position_indicator;
         let time_to_reach = (brain_v + position_indicator*(brain_v*brain_v - 4.0*brain_acceleration*(location.needle_z as f64 - brain_current as f64)).sqrt())/(2.0*brain_acceleration);
-        //println!( "Time to reach: {} {} {} {} {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
-        assert!(time_to_reach < 1000.0, "Time to reach: {} {} {} {} velocity: {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
+        println!( "Time to reach: {} {} {} {} {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
+        assert!(time_to_reach < 1000.0 && time_to_reach > 0.0, "Time to reach: {} {} {} {} velocity: {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
+        if time_to_reach > MAX_TIME_TO_REACH_DEPTH as f64{
+            return None;
+        }
         let relative_position = brain_current as f64 + brain_v*time_to_reach;
-        //println!("Relative position: {}", relative_position);
         Some(relative_position as u64)
     }
 
@@ -192,7 +207,7 @@ impl<'a> Controller{
         let diff = distance - prediction;
         let diff = diff.abs();
         if diff > MAX_PREDICTION_ERROR_NM as f64{
-            //println!("ABNORMAL DISTANCE: {}", distance);
+            println!("ABNORMAL DISTANCE: {}", distance);
         }
         return diff > MAX_PREDICTION_ERROR_NM as f64;
     }
@@ -208,10 +223,7 @@ async fn poll_surface_distance(control_state: Arc<Controller>, tx: mpsc::Sender<
     loop {
         let tx_clone = tx.clone();
         // Spawn a task to fetch the distance without blocking the polling loop
-        let distance = {
-            let guard: tokio::sync::MutexGuard<'_, RobotArm> = control_state.robot.lock().await;
-            guard.get_surface_distance().await
-        };
+        let distance = control_state.get_surface_distance().await;
         tokio::spawn({ 
             async move {
             let temp = distance.clone();
@@ -227,6 +239,7 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
     while let Some(distance_result) = rx.recv().await {
         match distance_result {
             Ok(distance) => {
+                //println!("Distance: {}", distance);
                 let current_state = control_state.current_state.lock().unwrap().clone();
                 let can_panic = current_state == ControllerState::OutOfBrainCalibrated || current_state == ControllerState::InBrain;
                 // Check for abnormal distance
@@ -268,9 +281,6 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
         }
         {
             let mut time_queue = control_state.distance_time_queue.lock().unwrap();
-            if(time_queue.len() > 0){
-                println!("{}",time_queue.back().unwrap().elapsed().as_millis());   
-            }
             time_queue.push_back(Instant::now());
             let expected_length = if control_state.out_of_brain_uncalibrated() {CALIBRATION_SAMPLES} else {MAX_DISTANCES};
             while time_queue.len() > expected_length.try_into().unwrap() {
@@ -283,10 +293,12 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
 async fn process_robot_state(control_state: Arc<Controller>) {
     loop{
         let robot_state = {
-            control_state.robot.lock().await.get_robot_state().await
+            control_state.get_robot_state().await
         };
         match robot_state {
-            Ok(_) => {}
+            Ok(_) => {
+                //println!("Robot state: {:?}", r);
+            }
             Err(RobotError::ConnectionError{..}) | Err(RobotError::MoveError{..}) => {
                 println!("Received error in processing robot state");
             }
@@ -322,9 +334,10 @@ async fn panic(control_state: Arc<Controller>) {
 
 async fn calibrate(control_state: Arc<Controller>) {
     assert!({
-        control_state.robot.lock().await.get_robot_state().await.unwrap() == RobotState{inserter_z: 0, needle_z: 0} &&
+        control_state.get_robot_state().await.unwrap() == RobotState{inserter_z: 0, needle_z: 0} &&
         control_state.out_of_brain_uncalibrated()
     });
+    println!("Out of assert in calibrate");
     let calibration_init = Instant::now();
     {
         let mut queue = control_state.distance_queue.lock().unwrap();
@@ -336,22 +349,18 @@ async fn calibrate(control_state: Arc<Controller>) {
         *control_state.arima.lock().unwrap() = None;
     }
     loop{
-        //println!("Calibrating");
         {
             let distance_queue = control_state.distance_queue.lock().unwrap();
             let distance_time_queue = control_state.distance_time_queue.lock().unwrap();
             if distance_queue.len() >= CALIBRATION_SAMPLES.try_into().unwrap() && distance_queue.front().unwrap().is_ok() && *distance_time_queue.front().unwrap() >= calibration_init {
+                let min_distance = distance_queue.iter().filter(|d| d.is_ok()).min_by_key(|d| d.as_ref().unwrap()).unwrap().as_ref().unwrap();
+                let mut guard = control_state.pre_move_location.lock().unwrap();
+                assert!(*min_distance > MIN_DISTANCE_BRAIN_TO_ARM_NM);
+                *guard = Some(*min_distance - MIN_DISTANCE_BRAIN_TO_ARM_NM);
                 break;
             }
         }
         sleep(Duration::from_millis(10)).await;
-    }
-    {
-        let distance_queue = control_state.distance_queue.lock().unwrap();
-        let min_distance = distance_queue.iter().filter(|d| d.is_ok()).min_by_key(|d| d.as_ref().unwrap()).unwrap().as_ref().unwrap();
-        let mut guard = control_state.pre_move_location.lock().unwrap();
-        assert!(*min_distance > MIN_DISTANCE_BRAIN_TO_ARM_NM);
-        *guard = Some(*min_distance - MIN_DISTANCE_BRAIN_TO_ARM_NM);
     }
     move_bot(control_state.clone(), &Move::InserterZ(control_state.pre_move_location.lock().unwrap().unwrap()), ControllerState::OutOfBrainUncalibrated, false).await;
     {
@@ -365,18 +374,18 @@ async fn calibrate(control_state: Arc<Controller>) {
         {
             let distance_queue = control_state.distance_queue.lock().unwrap();
             let distance_time_queue = control_state.distance_time_queue.lock().unwrap();
+            let mut arima = control_state.arima.lock().unwrap();
             if distance_queue.len() >= CALIBRATION_SAMPLES.try_into().unwrap() && distance_queue.front().unwrap().is_ok() && *distance_time_queue.front().unwrap() >= calibration_init {
-                break;
+                let mut trained_arima = ARIMA::new(MIN_CALIBRATION_TRAINING_POINTS);
+                println!("Training ARIMA");
+                let success = trained_arima.train_u64(&distance_queue);
+                if success {
+                    *arima = Some(trained_arima);
+                    break;   
+                }
             }
         }
         sleep(Duration::from_millis(10)).await;
-    }
-    {
-        let mut queue = control_state.distance_queue.lock().unwrap();
-        let mut arima = control_state.arima.lock().unwrap();
-        let mut trained_arima = ARIMA::new(MIN_CALIBRATION_TRAINING_POINTS);
-        trained_arima.train_u64(&queue);
-        *arima = Some(trained_arima);
     }
     move_bot(control_state.clone(), &Move::NeedleZ(0), ControllerState::OutOfBrainCalibrated, false).await;
     {
@@ -385,6 +394,7 @@ async fn calibrate(control_state: Arc<Controller>) {
         queue.clear();
         time_queue.clear();
     }
+    println!("---------------------------------------------------------------------------------------------------------------------------------------");
 }
 
 pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
@@ -405,7 +415,6 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
         async move {
             process_robot_state(me).await;
         }});
-    
     {
         let mut state_changer = control_state.current_state.lock().unwrap();
         *state_changer = ControllerState::OutOfBrainUncalibrated;
@@ -416,6 +425,7 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
             panic(control_state.clone()).await;
         }
         if control_state.out_of_brain_uncalibrated(){
+            println!("Got here");
             calibrate(control_state.clone()).await;
             println!("Calibrated");
         }
@@ -424,6 +434,7 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
         //println!("Looping back for next insert");
     }
     transition_state(control_state, ControllerState::Dead, false);
+    println!("Done");
 }
 
 async fn retract_ib(control_state: Arc<Controller>) {
@@ -432,8 +443,9 @@ async fn retract_ib(control_state: Arc<Controller>) {
 
 async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u64) -> bool {
     assert!(commanded_depth >= COMMANDED_DEPTH_MIN_NM && commanded_depth <= COMMANDED_DEPTH_MAX_NM);
-    let needle_pos = {control_state.robot.lock().await.get_robot_state().await.unwrap().needle_z};
+    let needle_pos = control_state.get_robot_state().await.unwrap().needle_z;
     assert!(needle_pos == 0, "Needle not at zero, instead at: {}", needle_pos);
+    assert!(control_state.arima.lock().unwrap().is_some() && control_state.arima.lock().unwrap().as_ref().unwrap().is_trained(), "ARIMA not trained {}", control_state.arima.lock().unwrap().is_some());
     let init_time = Instant::now();
     while !control_state.in_panic() && Instant::now().duration_since(init_time).as_millis() < MAX_IB_TIME.into() {
         let Some(relative_position) = control_state.get_move_location(commanded_depth) else{
@@ -442,7 +454,7 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
         };
         assert!(relative_position > 0 && relative_position < 10_000_000, "Invalid position: {}", relative_position);
         let response = {
-            control_state.robot.lock().await.command_move(&Move::NeedleZ(relative_position)).await
+            control_state.command_move(&Move::NeedleZ(relative_position)).await
         };
         match response {
             Ok(_) => {
@@ -468,14 +480,14 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
 }
 
 async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: ControllerState, from_panic: bool) -> () {
+    println!("Moving to position: {}", command);
     loop {
-        let response = {
-            control_state.robot.lock().await.command_move(command).await
-        };
+        let response = 
+            control_state.command_move(command).await;
         //print!("THERES NO DEADLOCK");
         match response {
             Ok(_) => {
-                //println!("Moved to position: {}", command);
+                println!("Moved to position: {}", command);
                 break;
             }
             Err(RobotError::MoveError{..}) | Err(RobotError::ConnectionError{..}) => {
@@ -485,7 +497,7 @@ async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: Co
                 die(control_state.clone());
             }
         }
-        sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
     transition_state(control_state,next_state, from_panic);
 }
@@ -500,4 +512,45 @@ fn transition_state(control_state: Arc<Controller>, next_state: ControllerState,
         return;
     }
     *state_changer = next_state;
+}
+
+impl Robot for Controller{
+
+    async fn command_grasp(& self) -> Result<(), RobotError> {
+       return Ok(());
+    }
+    
+    async fn command_move(& self, move_type: &Move) -> Result<(), RobotError> {
+        loop{
+            let (tx, rx) = oneshot::channel();
+            match self.move_tx.send((move_type.clone(), tx)).await{
+                Ok(_) => return rx.await.unwrap(),
+                Err(_) => {}
+            }
+        };
+    }
+    
+    async fn get_robot_state(& self) -> Result<RobotState, RobotError> {
+        loop{
+            let (tx, rx) = oneshot::channel();
+            match self.state_tx.send(((), tx)).await{
+                Ok(_) => return rx.await.unwrap(),
+                Err(_) => {}
+            }
+        };
+    }
+
+}
+
+impl OCTService for Controller{
+    
+    async fn get_surface_distance(& self) -> Result<u64, OCTError> {
+        loop{
+            let (tx, rx) = oneshot::channel();
+            match self.distance_tx.send(((), tx)).await{
+                Ok(_) => return rx.await.unwrap(),
+                Err(_) => {}
+            }
+        };
+    }
 }

@@ -1,13 +1,20 @@
-use crate::interface::{Robot, Move, OCTService, RobotError, OCTError, RobotState};
+use crate::interface::{Move, RobotError, OCTError, RobotState};
 use rand::Rng;
 use tokio::time::{sleep, Duration, Instant};
 use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::{oneshot,mpsc};
 
 const NEEDLE_ACCELERATION_NM_MS: i64 = 250;     // nm/ms² (for needle)
 const NEEDLE_VELOCITY_NM_MS: u64 = 250_000;     // nm/ms (for needle)
 const INSERTER_VELOCITY_NM_MS: u64 = 9_500;    // nm/ms (for inserter arm)
 
-pub struct RobotArmStateMutable {
+pub struct RobotArm {
+    pub distance_errors: bool,
+    pub state_errors: bool,
+    pub move_errors: bool,
+    pub brain_location_fn: fn(u64) -> u64,
+    init_time: Instant,
     state: RobotState,
     is_moving: bool,
     last_move_time: Option<Instant>,
@@ -20,9 +27,18 @@ pub struct RobotArmStateMutable {
     error_scheduled: bool,
 }
 
-impl RobotArmStateMutable {
-    fn new(initial_z: u64) -> Self {
-        Self {
+impl RobotArm {
+    pub fn new(initial_z: u64) -> RobotArm {
+        RobotArm {
+            distance_errors: false,
+            state_errors: false,
+            move_errors: false,
+            init_time: Instant::now(),
+            brain_location_fn: |x: u64| {
+                (7_000_000.0
+                    + 500_000.0 * (6.0 * x as f64/1000.0).sin()
+                    + 1_000_000.0 * (x as f64/1000.0).sin()) as u64
+            },
             state: RobotState {
                 inserter_z: initial_z,
                 needle_z: 0,
@@ -36,32 +52,6 @@ impl RobotArmStateMutable {
             is_inserter_move: false,
             is_needle_move: false,
             error_scheduled: false,
-        }
-    }
-}
-
-pub struct RobotArm {
-    pub distance_errors: bool,
-    pub state_errors: bool,
-    pub move_errors: bool,
-    pub brain_location_fn: fn(u64) -> u64,
-    init_time: Instant,
-    inner: Mutex<RobotArmStateMutable>,
-}
-
-impl RobotArm {
-    pub fn new() -> RobotArm {
-        RobotArm {
-            distance_errors: false,
-            state_errors: false,
-            move_errors: false,
-            init_time: Instant::now(),
-            brain_location_fn: |x: u64| {
-                (7_000_000.0
-                    + 500_000.0 * (6.0 * x as f64/1000.0).sin()
-                    + 1_000_000.0 * (x as f64/1000.0).sin()) as u64
-            },
-            inner: Mutex::new(RobotArmStateMutable::new(0)),
         }
     }
 
@@ -158,76 +148,61 @@ impl RobotArm {
         let fraction = (t / total_t).min(1.0);
         (start_z as f64 + d * fraction) as i64
     }
-}
 
-impl OCTService for RobotArm {
-    async fn get_surface_distance(&self) -> Result<u64, OCTError> {
-        let probability: f64 = { let mut rng = rand::thread_rng();
-            rng.gen()
-        };
-        let robot_position = self.get_robot_state().await.unwrap().inserter_z;
-        let brain_position = (self.brain_location_fn)(self.init_time.elapsed().as_millis() as u64);
-        assert!(brain_position > 0 && brain_position > robot_position, "brain position: {}, robot position: {}", brain_position, robot_position);
-        sleep(Duration::from_millis(15)).await;
-        if probability < 0.1 && self.distance_errors {
-            Err(OCTError::CommunicationError {
-                msg: "Connection error".to_string(),
-            })
-        } else {
-            Ok(brain_position - robot_position)
-        }
-    }
-}
-
-impl Robot for RobotArm {
-    async fn command_grasp(&self) -> Result<(), RobotError> {
-        Ok(())
-    }
-
-    async fn get_robot_state(&self) -> Result<RobotState, RobotError> {
-        let guard = self.inner.lock().await;
-        if guard.is_moving {
-            let elapsed = guard.last_move_time.unwrap().elapsed();
-            let mut state = guard.state.clone();
-
-            if guard.is_inserter_move {
+    fn _get_state(&self) -> Result<RobotState, RobotError> {
+        if self.is_moving {
+            let elapsed = self.last_move_time.unwrap().elapsed();
+            let mut state = self.state.clone();
+            if self.is_inserter_move {
                 // InserterZ move: interpolate inserter_z only, needle_z unchanged
-                let pos = Self::interpolate_inserter_position(
-                    guard.start_z as i64,
-                    guard.target_z as i64,
+                let pos = RobotArm::interpolate_inserter_position(
+                    self.start_z as i64,
+                    self.target_z as i64,
                     elapsed,
-                    guard.total_move_duration,
+                    self.total_move_duration,
                 );
                 assert!(pos >= 0);
-                assert!(guard.total_move_duration <= Duration::from_secs(2));
+                assert!(self.total_move_duration <= Duration::from_secs(2));
                 state.inserter_z = pos as u64;
-            } else if guard.is_needle_move {
+            } else if self.is_needle_move {
                 // NeedleZ move: interpolate needle_z only, inserter_z unchanged
-                let pos = Self::interpolate_needlez_position(
-                    guard.start_z as i64,
-                    guard.target_z as i64,
+                let pos = RobotArm::interpolate_needlez_position(
+                    self.start_z as i64,
+                    self.target_z as i64,
                     elapsed,
-                    guard.total_move_duration,
+                    self.total_move_duration,
                 );
                 assert!(pos >= 0);
                 state.needle_z = pos as u64;
             }
-
-            Ok(state)
+            return Ok(state.clone());
         } else {
-            Ok(guard.state.clone())
+            return Ok(self.state.clone());
         }
     }
 
-    async fn command_move(&self, move_cmd: &Move) -> Result<(), RobotError> {
+}
+
+async fn get_state(robot: Arc<Mutex<RobotArm>>, mut state_rx: mpsc::Receiver<((), oneshot::Sender<Result<RobotState, RobotError>>)>) -> () {
+    println!("get_state");
+    while let Some((_, tx)) = state_rx.recv().await {
+        tx.send({
+            robot.lock().await._get_state()}
+        ).unwrap();
+    }
+}
+
+async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, oneshot::Sender<Result<(), RobotError>>)>,) -> (){
+    println!("mv");
+    while let Some((move_cmd, tx)) = move_rx.recv().await {
         let (is_inserter_move, is_needle_move, start_z, target_z, total_move_duration, error_scheduled);
 
         {
-            let mut guard = self.inner.lock().await;
+            let mut guard = robot.lock().await;
             assert!(!guard.is_moving);
             // Decide if an error will occur now, before starting the move
             let mut rng = rand::thread_rng();
-            let will_error = self.move_errors && rng.gen_bool(0.1);
+            let will_error = guard.move_errors && rng.gen_bool(0.1);
 
             match move_cmd {
                 Move::InserterZ(z) => {
@@ -237,12 +212,12 @@ impl Robot for RobotArm {
                     if will_error {
                         // Pick a partial error position
                         let partial_factor: f64 = rng.gen();
-                        guard.target_z = (guard.start_z as i64 + ((*z as i64 - guard.start_z as i64) as f64 * partial_factor) as i64) as u64;
+                        guard.target_z = (guard.start_z as i64 + ((z as i64 - guard.start_z as i64) as f64 * partial_factor) as i64) as u64;
                     } else {
-                        guard.target_z = *z;
+                        guard.target_z = z;
                     }
                     let distance = (guard.target_z as i64 - guard.start_z as i64).abs();
-                    guard.total_move_duration = Self::calculate_inserter_move_time(distance);
+                    guard.total_move_duration = RobotArm::calculate_inserter_move_time(distance);
                 }
                 Move::NeedleZ(z) => {
                     guard.is_inserter_move = false;
@@ -250,12 +225,12 @@ impl Robot for RobotArm {
                     guard.start_z = guard.state.needle_z;
                     if will_error {
                         let partial_factor: f64 = rng.gen();
-                        guard.target_z = (guard.start_z as i64 + ((*z as i64 - guard.start_z as i64) as f64 * partial_factor) as i64) as u64;
+                        guard.target_z = (guard.start_z as i64 + ((z as i64 - guard.start_z as i64) as f64 * partial_factor) as i64) as u64;
                     } else {
-                        guard.target_z = *z;
+                        guard.target_z = z;
                     }
                     let distance = (guard.target_z as i64 - guard.start_z as i64).abs();
-                    guard.total_move_duration = Self::calculate_needlez_move_time(distance);
+                    guard.total_move_duration = RobotArm::calculate_needlez_move_time(distance);
                 }
             }
 
@@ -275,29 +250,71 @@ impl Robot for RobotArm {
 
         // Simulate the move duration
         sleep(total_move_duration).await;
+        {
+            let mut guard = robot.lock().await;
+            guard.is_moving = false;
+            guard.last_move_time = None;
+            guard.last_move = None;
 
-        let mut guard = self.inner.lock().await;
-        guard.is_moving = false;
-        guard.last_move_time = None;
-        guard.last_move = None;
+            // At this point, the robot physically ends at target_z.
+            if is_inserter_move {
+                guard.state.inserter_z = target_z;
+            } else if is_needle_move {
+                guard.state.needle_z = target_z;
+            }
 
-        // At this point, the robot physically ends at target_z.
-        if is_inserter_move {
-            guard.state.inserter_z = target_z;
-        } else if is_needle_move {
-            guard.state.needle_z = target_z;
+            guard.is_inserter_move = false;
+            guard.is_needle_move = false;
+
+            if error_scheduled {
+                guard.error_scheduled = false;
+                tx.send(Err(RobotError::PositionError {
+                    msg: "Random error occurred after move".to_string(),
+                })).unwrap();
+            } else{
+                tx.send(Ok(())).unwrap();
+            }
         }
+    }
+}
 
-        guard.is_inserter_move = false;
-        guard.is_needle_move = false;
+pub async fn start(distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, OCTError>>)>,
+                    state_rx: mpsc::Receiver<((), oneshot::Sender<Result<RobotState, RobotError>>)>,
+                    move_rx: mpsc::Receiver<(Move, oneshot::Sender<Result<(), RobotError>>)>,
+                    robot: Arc<Mutex<RobotArm>>) {
 
-        if error_scheduled {
-            guard.error_scheduled = false;
-            return Err(RobotError::ConnectionError {
-                msg: "Random error occurred after move (partial position)".to_string(),
-            });
+    let r1 = Arc::clone(&robot);
+    let r2 = Arc::clone(&robot);
+    let r3 = Arc::clone(&robot);
+    println!("Starting robot...");
+    tokio::task::spawn(get_distance(r1, distance_rx));
+    tokio::task::spawn(mv(r2, move_rx));
+    tokio::task::spawn(get_state(r3, state_rx));
+
+    loop{
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn get_distance(robot: Arc<Mutex<RobotArm>>, mut distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, OCTError>>)>,) -> () {
+    println!("get_distance");
+    while let Some((_, tx)) = distance_rx.recv().await {
+        let probability: f64 = { let mut rng = rand::thread_rng();
+            rng.gen()
+        };
+        let (diff, distance_errors) = 
+        {
+            let guard = robot.lock().await;
+            let robot_position = guard._get_state().unwrap().inserter_z;
+            let brain_position = (guard.brain_location_fn)(guard.init_time.elapsed().as_millis() as u64);
+            assert!(brain_position > 0 && brain_position > robot_position, "brain position: {}, robot position: {}", brain_position, robot_position);
+            (brain_position - robot_position, guard.distance_errors)
+        };
+        sleep(Duration::from_millis(15)).await;
+        if probability < 0.1 && distance_errors {
+            tx.send(Err(OCTError::CommunicationError { msg: "Connection error".to_string() })).unwrap();
+        } else {
+            tx.send(Ok(diff)).unwrap();
         }
-
-        Ok(())
     }
 }
