@@ -1,10 +1,9 @@
 mod interface;
 mod controller;
-//mod robot;
-mod robot_chat;
+mod robot;
 mod arima;
 use interface::RobotState;
-use robot_chat::RobotArm;
+use robot::RobotArm;
 use std::{os::macos::raw::stat, sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::runtime::Builder;
@@ -45,7 +44,7 @@ fn main() {
         rt.block_on(async move {
             // Because run now takes &mut self, 
             // we can borrow thread_two_context mutably here.
-            robot_chat::start(distance_rx, state_rx, move_rx, robot).await; 
+            robot::start(distance_rx, state_rx, move_rx, robot).await; 
 
             // After `run()` completes, we could still use `thread_two_context` if we wanted to,
             // or call `run()` again.
