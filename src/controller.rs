@@ -1,27 +1,32 @@
 use crate::interface::{RobotError, RobotState, OCTService, OCTError, Move, Robot}; //OCTError;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration, Instant};
+use std::cmp::max;
 use std::sync::{Mutex,Arc}; //Arc;
 use std::collections::VecDeque;
 use crate::arima::ARIMA;
+use roots::find_roots_quartic;
+use roots::Roots;
 
 const CALIBRATION_SAMPLES: u64 = 500;
 const MIN_CALIBRATION_TRAINING_POINTS: u64 = CALIBRATION_SAMPLES/2;
 const MIN_DISTANCE_BRAIN_TO_ARM_NM: u64 = 200_000;
 const MAX_DISTANCES: u64 = 100;
 const MAX_STATES: u64 = 100;
-const MAX_IB_TIME: u64 = 1_000;
+const MAX_IB_TIME: u64 = 30_000;
 const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 5;
 const MAX_PREDICTION_ERROR_NM: u64 = 50_000;
 const MAX_BRAIN_VEL_NM_S: u64 = 10_000;
 const MAX_TIME_TO_REACH_DEPTH: u64 = 150;
 const MAX_LATENCY_MS: u64 = 30;
+const MAX_DISTANCE_TO_BRAIN_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM *2;
+const TAYLOR_POLY_ORDER: u64 = 4; //must stay 4 unless get move location function is changed
 
 const OCT_POLL_MILLIS: u64 = 5;
 const OCT_LATENCY_MEAN: u64 = 15;
 const ROBOT_STATE_POLL_MILLIS: u64 = 5;
 const NEEDLE_ACCELERATION_NM_MS: i64 = 250;
-const NEEDLE_VELOCITY_NM_MS: u64 = 250_000;
+//const NEEDLE_VELOCITY_NM_MS: u64 = 250_000;
 const COMMANDED_DEPTH_MIN_NM: u64 = 3_000_000;
 const COMMANDED_DEPTH_MAX_NM: u64 = 7_000_000;
 
@@ -56,15 +61,17 @@ pub struct Controller {
     consecutive_errors: Mutex<u64>,
     pre_move_location: Mutex<Option<u64>>, //u64
     arima: Mutex<Option<ARIMA>>, //ARIMA>
-    pub distance_tx: mpsc::Sender<((), oneshot::Sender<Result<u64, OCTError>>)>,
-    pub state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>, //mpsc::Sender<()>,
-    pub move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>, //mpsc::Sender<Move>,
+    distance_tx: mpsc::Sender<((), oneshot::Sender<Result<u64, OCTError>>)>,
+    state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>, //mpsc::Sender<()>,
+    move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>, //mpsc::Sender<Move>,
+    dead_tx: mpsc::Sender<()>,
 }
 
 impl Controller{
     pub fn new(distance_tx: mpsc::Sender<((), oneshot::Sender<Result<u64, OCTError>>)>,
             state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>,
-            move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>) -> Controller {
+            move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>,
+            dead_tx: mpsc::Sender<()>) -> Controller {
         Controller {
             current_state: Mutex::new(ControllerState::Dead), //ControllerState::Dead,
             distance_queue: Mutex::new(VecDeque::new()), //VecDeque::new(),
@@ -76,7 +83,8 @@ impl Controller{
             arima: Mutex::new(None),
             distance_tx,
             state_tx,
-            move_tx
+            move_tx,
+            dead_tx
         }
     }
 
@@ -103,43 +111,122 @@ impl Controller{
     }
 
     //Prediction time is fine
-    fn get_move_location(&self, commanded_depth: u64) -> Option<u64> {
-        let state_changer = self.robot_queue.lock().unwrap();
-        let curr_front = state_changer.back();
-        let Some(potential_location) = curr_front else{
-            return None;
-        };
-        let Ok(location) = potential_location else{
-            return None;
-        };
+    // fn get_move_location(&self, commanded_depth: u64) -> Option<u64> {
+    //     let state_changer = self.robot_queue.lock().unwrap();
+    //     let curr_front = state_changer.back();
+    //     let Some(potential_location) = curr_front else{
+    //         return None;
+    //     };
+    //     let Ok(location) = potential_location else{
+    //         return None;
+    //     };
 
-        let brain_current = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN));
-        let brain_next = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN + OCT_POLL_MILLIS));
-        if brain_current.is_err() || brain_next.is_err() {
+    //     let brain_current = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN));
+    //     let brain_next = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN + OCT_POLL_MILLIS));
+    //     if brain_current.is_err() || brain_next.is_err() || brain_current.clone().unwrap() > MAX_DISTANCE_TO_BRAIN_MOVE{
+    //         return None;
+    //     }
+    //     let latency ={(*self.distance_time_queue.lock().unwrap().back().unwrap() - *self.robot_time_queue.lock().unwrap().front().unwrap()).as_millis() as f64/self.distance_queue.lock().unwrap().len() as f64};
+    //     if latency > MAX_LATENCY_MS as f64{
+    //         return None;
+    //     }
+    //     let brain_current = brain_current.unwrap() + commanded_depth;
+    //     let brain_next = brain_next.unwrap() + commanded_depth;
+    //     let brain_v = (brain_next as f64 - brain_current as f64) / latency as f64; // in nm/ms
+    //     if brain_v.abs() > MAX_BRAIN_VEL_NM_S as f64 {
+    //         return None;
+    //     }
+    //     let position_indicator = if location.needle_z < brain_current {1.0} else {-1.0};
+    //     let brain_acceleration = NEEDLE_ACCELERATION_NM_MS as f64 * position_indicator;
+    //     let time_to_reach = (brain_v + position_indicator*(brain_v*brain_v - 4.0*brain_acceleration*(location.needle_z as f64 - brain_current as f64)).sqrt())/(2.0*brain_acceleration);
+    //     assert!(time_to_reach < 1000.0 && time_to_reach > 0.0, "Time to reach: {} {} {} {} velocity: {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
+    //     if time_to_reach > MAX_TIME_TO_REACH_DEPTH as f64{
+    //         return None;
+    //     }
+    //     let relative_position = brain_current as f64 + brain_v*time_to_reach;
+    //     Some(relative_position as u64)
+    // }
+
+    fn _get_taylor_coefs(data: &Vec<u64>, n: u64, latency: f64) -> Vec<f64>{
+        assert!(n > 0 && n <= data.len() as u64);
+        let mut current = data.iter().map(|&x| x as i64).collect::<Vec<i64>>();
+        let mut coefs = Vec::new();
+        coefs.push(current[current.len() - 1] as f64);
+        let mut factorial = 1;
+
+        // Apply the backward difference n times
+        for i in 0..n {
+            // Compute the backward difference: Δf(x) = f(x) - f(x-1)
+            factorial *= i+1;
+            let next = current
+                .windows(2)
+                .map(|w| (w[1] - w[0]) / latency as i64) // (w[1] - w[0])
+                .collect::<Vec<i64>>();
+            coefs.push(next[next.len() - 1] as f64 / factorial as f64);
+            current = next;
+        }
+        return coefs;
+    }
+
+    fn get_move_location(&self, commanded_depth: u64) -> Option<u64> {
+        let queue = self.distance_queue.lock().unwrap();
+        let time_queue = self.distance_time_queue.lock().unwrap();
+        const data_len: usize = TAYLOR_POLY_ORDER as usize+1;
+        if queue.len() < data_len{
             return None;
         }
-        let latency ={(*self.distance_time_queue.lock().unwrap().back().unwrap() - *self.robot_time_queue.lock().unwrap().front().unwrap()).as_millis() as f64/self.distance_queue.lock().unwrap().len() as f64};
+        let latency = (*time_queue.back().unwrap() - *time_queue.front().unwrap()).as_millis() as f64/queue.len() as f64;
         if latency > MAX_LATENCY_MS as f64{
             return None;
         }
-        let brain_current = brain_current.unwrap() + commanded_depth;
-        let brain_next = brain_next.unwrap() + commanded_depth;
-        let brain_v = (brain_next as f64 - brain_current as f64) / latency as f64; // in nm/ms
-        if brain_v.abs() > MAX_BRAIN_VEL_NM_S as f64 {
+        let mut data = Vec::from(queue.clone());
+        let Some(new_data) = data.last_chunk_mut::<data_len>() else{
             return None;
+        };
+        let mut data = Vec::new();
+        for i in 0..new_data.len(){
+            if let Ok(x) = new_data[i]{
+                data.push(x);
+            } else{
+                return None;
+            }
         }
-        let position_indicator = if location.needle_z < brain_current {1.0} else {-1.0};
-        let brain_acceleration = NEEDLE_ACCELERATION_NM_MS as f64 * position_indicator;
-        let time_to_reach = (brain_v + position_indicator*(brain_v*brain_v - 4.0*brain_acceleration*(location.needle_z as f64 - brain_current as f64)).sqrt())/(2.0*brain_acceleration);
-        assert!(time_to_reach < 1000.0 && time_to_reach > 0.0, "Time to reach: {} {} {} {} velocity: {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
-        if time_to_reach > MAX_TIME_TO_REACH_DEPTH as f64{
+        let coefs = Self::_get_taylor_coefs(&data, TAYLOR_POLY_ORDER, latency);
+        let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/2.0, coefs[1], coefs[0]);
+        let pos = |x: f64| coefs[0] + coefs[1]*x + coefs[2]*x*x + coefs[3]*x*x*x + coefs[4]*x*x*x*x;
+        match roots{
+            Roots::No(_) => None,
+            Roots::One(x) => {
+                assert!(x[0] > 0.0);
+                Some(pos(x[0]) as u64 + commanded_depth)
+            },            
+            Roots::Two(x) => {
+                assert!(f64::max(x[0], x[1]) > 0.0);
+                Some(pos(f64::max(x[0], x[1])) as u64 + commanded_depth)
+            },
+            Roots::Three(mut x) => {
+                x.sort_by(|a,b| a.partial_cmp(b).unwrap());
+                for i in 0..2{
+                    if x[i] > 0.0{
+                        return Some(pos(x[i]) as u64 + commanded_depth);
+                    }
+                }
+                return None;
+            },
+            Roots::Four(mut x) => {
+                x.sort_by(|a,b| a.partial_cmp(b).unwrap());
+                for i in 0..2{
+                    if x[i] > 0.0{
+                        return Some(pos(x[i]) as u64 + commanded_depth);
+                    }
+                }
             return None;
+            }   
         }
-        let relative_position = brain_current as f64 + brain_v*time_to_reach;
-        Some(relative_position as u64)
     }
 
-    fn predict_brain_position(&self, future_duration: Duration) -> Result<u64, OCTError> {
+    fn predict_brain_position_local(&self, future_duration: Duration) -> Result<u64, OCTError> {
+        assert!(future_duration < Duration::from_millis(MAX_LATENCY_MS));
         let queue = self.distance_queue.lock().unwrap();
         let time_queue = self.distance_time_queue.lock().unwrap();
         if queue.len() < 2{
@@ -169,7 +256,7 @@ impl Controller{
     }
 
     fn is_abnormal_distance(&self, distance: u64) -> bool {
-        let prediction = self.predict_brain_position(Duration::from_millis(OCT_POLL_MILLIS));
+        let prediction = self.predict_brain_position_local(Duration::from_millis(OCT_POLL_MILLIS));
         if prediction.is_err(){
             return true;
         }
@@ -220,7 +307,7 @@ async fn poll_surface_distance(control_state: Arc<Controller>, tx: mpsc::Sender<
     }
 }
 async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receiver<Result<u64, OCTError>>) {
-    while let Some(mut distance_result) = rx.recv().await {
+    while let Some(distance_result) = rx.recv().await {
         // {
         //     let mut queue = control_state.distance_time_queue.lock().unwrap();
         //     if queue.len() > 0 && queue.back().unwrap().elapsed().as_millis() > MAX_LATENCY_MS as u128 {
@@ -405,8 +492,9 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
         assert!(control_state.out_of_brain_calibrated());
         outcomes.push(insert_ib_open_loop(control_state.clone(), *depth).await);
     }
-    transition_state(control_state, ControllerState::Dead, false);
+    transition_state(control_state.clone(), ControllerState::Dead, false);
     println!("Done");
+    control_state.dead_tx.send(()).await.unwrap();
 }
 
 async fn retract_ib(control_state: Arc<Controller>) {
@@ -451,14 +539,12 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
 }
 
 async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: ControllerState, from_panic: bool) -> () {
-    println!("Moving to position: {}", command);
     loop {
         let response = 
             control_state.command_move(command).await;
         //print!("THERES NO DEADLOCK");
         match response {
             Ok(_) => {
-                println!("Moved to position: {}", command);
                 break;
             }
             Err(RobotError::MoveError{..}) | Err(RobotError::ConnectionError{..}) => {

@@ -25,6 +25,7 @@ pub struct RobotArm {
     is_inserter_move: bool,
     is_needle_move: bool,
     error_scheduled: bool,
+    pub brain_distances: Vec<u64>,
 }
 
 impl RobotArm {
@@ -52,6 +53,7 @@ impl RobotArm {
             is_inserter_move: false,
             is_needle_move: false,
             error_scheduled: false,
+            brain_distances: Vec::new(),
         }
     }
 
@@ -249,17 +251,22 @@ async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, ones
         }
 
         // Simulate the move duration
+        println!("Duration: {}", total_move_duration.as_millis());
         sleep(total_move_duration).await;
         {
             let mut guard = robot.lock().await;
             guard.is_moving = false;
             guard.last_move_time = None;
             guard.last_move = None;
-
             // At this point, the robot physically ends at target_z.
             if is_inserter_move {
                 guard.state.inserter_z = target_z;
             } else if is_needle_move {
+                let brain_position = (guard.brain_location_fn)(guard.init_time.elapsed().as_millis() as u64) - guard.state.inserter_z;
+                if target_z > 0 {
+                    assert!(brain_position < target_z, "brain position: {}, target position: {}", brain_position, target_z);
+                    guard.brain_distances.push(target_z - brain_position);
+                }
                 guard.state.needle_z = target_z;
             }
 
@@ -281,6 +288,7 @@ async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, ones
 pub async fn start(distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, OCTError>>)>,
                     state_rx: mpsc::Receiver<((), oneshot::Sender<Result<RobotState, RobotError>>)>,
                     move_rx: mpsc::Receiver<(Move, oneshot::Sender<Result<(), RobotError>>)>,
+                    mut dead_rx: mpsc::Receiver<()>,
                     robot: Arc<Mutex<RobotArm>>) {
 
     let r1 = Arc::clone(&robot);
@@ -290,10 +298,7 @@ pub async fn start(distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, 
     tokio::task::spawn(get_distance(r1, distance_rx));
     tokio::task::spawn(mv(r2, move_rx));
     tokio::task::spawn(get_state(r3, state_rx));
-
-    loop{
-        tokio::task::yield_now().await;
-    }
+    dead_rx.recv().await;
 }
 
 async fn get_distance(robot: Arc<Mutex<RobotArm>>, mut distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, OCTError>>)>,) -> () {

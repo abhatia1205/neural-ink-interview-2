@@ -1,13 +1,12 @@
-mod interface;
-mod controller;
-mod robot;
-mod arima;
-use robot::RobotArm;
+use neuralink_final::robot;
+use neuralink_final::robot::RobotArm;
+use neuralink_final::controller;
 use std::{sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::runtime::Builder;
 
-fn main() {
+#[test]
+fn run_no_error() {
     println!("Hello, world!");
     let (distance_tx, distance_rx) = tokio::sync::mpsc::channel(100);
     let (state_tx, state_rx) = tokio::sync::mpsc::channel(100);
@@ -15,7 +14,6 @@ fn main() {
     let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(100);
 
     let robot = Arc::new(Mutex::new(RobotArm::new(0)));
-    let robot_clone = Arc::clone(&robot);
     let controller = controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx);
 
      // Create and run the first runtime on its own thread
@@ -27,8 +25,7 @@ fn main() {
         
         rt.block_on(async {
             // These async functions run on "Thread 1"
-            controller::start(Arc::new(controller), &vec![
-                                                        3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
+            controller::start(Arc::new(controller), &vec![3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
                                                         3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
                                                         4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
                                                         4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
@@ -56,9 +53,5 @@ fn main() {
     // Wait for both threads to finish
     handle_one.join().unwrap();
     handle_two.join().unwrap();
-
-    for i in robot_clone.blocking_lock().brain_distances.clone() {
-        print!("{}, ", i);
-    }
-
+    assert!(true);
 }

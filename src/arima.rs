@@ -5,8 +5,8 @@ extern crate approx;
 
 const MIN_NUM_POINTS: u64 = 8;
 
-#[derive(Debug)]
-pub struct ArimaError{}
+
+pub struct ArimaError;
 
 
 pub struct ARIMA{

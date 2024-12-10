@@ -7,5 +7,6 @@ edition = "2021"
 approx = "0.5.1"
 nalgebra = "0.33.2"
 rand = "0.8.5"
+roots = "0.0.8"
 tokio = { version = "1", features = ["full"] }
 
