@@ -13,20 +13,19 @@ const MIN_CALIBRATION_TRAINING_POINTS: u64 = CALIBRATION_SAMPLES/2;
 const MIN_DISTANCE_BRAIN_TO_ARM_NM: u64 = 200_000;
 const MAX_DISTANCES: u64 = 100;
 const MAX_STATES: u64 = 100;
-const MAX_IB_TIME: u64 = 30_000;
+const MAX_IB_TIME: u64 = 30_000; // HAS TO CHANGE
 const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 5;
 const MAX_PREDICTION_ERROR_NM: u64 = 50_000;
-const MAX_BRAIN_VEL_NM_S: u64 = 10_000;
-const MAX_TIME_TO_REACH_DEPTH: u64 = 150;
+
 const MAX_LATENCY_MS: u64 = 30;
-const MAX_DISTANCE_TO_BRAIN_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM *2;
 const TAYLOR_POLY_ORDER: u64 = 4; //must stay 4 unless get move location function is changed
+const MAX_DIST_FROM_PREMOVE_TO_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM + 50_000;
+
 
 const OCT_POLL_MILLIS: u64 = 5;
 const OCT_LATENCY_MEAN: u64 = 15;
 const ROBOT_STATE_POLL_MILLIS: u64 = 5;
 const NEEDLE_ACCELERATION_NM_MS: i64 = 250;
-//const NEEDLE_VELOCITY_NM_MS: u64 = 250_000;
 const COMMANDED_DEPTH_MIN_NM: u64 = 3_000_000;
 const COMMANDED_DEPTH_MAX_NM: u64 = 7_000_000;
 
@@ -110,43 +109,6 @@ impl Controller{
         distance_time_queue.clear();
     }
 
-    //Prediction time is fine
-    // fn get_move_location(&self, commanded_depth: u64) -> Option<u64> {
-    //     let state_changer = self.robot_queue.lock().unwrap();
-    //     let curr_front = state_changer.back();
-    //     let Some(potential_location) = curr_front else{
-    //         return None;
-    //     };
-    //     let Ok(location) = potential_location else{
-    //         return None;
-    //     };
-
-    //     let brain_current = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN));
-    //     let brain_next = self.predict_brain_position(Duration::from_millis(OCT_LATENCY_MEAN + OCT_POLL_MILLIS));
-    //     if brain_current.is_err() || brain_next.is_err() || brain_current.clone().unwrap() > MAX_DISTANCE_TO_BRAIN_MOVE{
-    //         return None;
-    //     }
-    //     let latency ={(*self.distance_time_queue.lock().unwrap().back().unwrap() - *self.robot_time_queue.lock().unwrap().front().unwrap()).as_millis() as f64/self.distance_queue.lock().unwrap().len() as f64};
-    //     if latency > MAX_LATENCY_MS as f64{
-    //         return None;
-    //     }
-    //     let brain_current = brain_current.unwrap() + commanded_depth;
-    //     let brain_next = brain_next.unwrap() + commanded_depth;
-    //     let brain_v = (brain_next as f64 - brain_current as f64) / latency as f64; // in nm/ms
-    //     if brain_v.abs() > MAX_BRAIN_VEL_NM_S as f64 {
-    //         return None;
-    //     }
-    //     let position_indicator = if location.needle_z < brain_current {1.0} else {-1.0};
-    //     let brain_acceleration = NEEDLE_ACCELERATION_NM_MS as f64 * position_indicator;
-    //     let time_to_reach = (brain_v + position_indicator*(brain_v*brain_v - 4.0*brain_acceleration*(location.needle_z as f64 - brain_current as f64)).sqrt())/(2.0*brain_acceleration);
-    //     assert!(time_to_reach < 1000.0 && time_to_reach > 0.0, "Time to reach: {} {} {} {} velocity: {}", time_to_reach, brain_current, location.needle_z, location.inserter_z, brain_v);
-    //     if time_to_reach > MAX_TIME_TO_REACH_DEPTH as f64{
-    //         return None;
-    //     }
-    //     let relative_position = brain_current as f64 + brain_v*time_to_reach;
-    //     Some(relative_position as u64)
-    // }
-
     fn _get_taylor_coefs(data: &Vec<u64>, n: u64, latency: f64) -> Vec<f64>{
         assert!(n > 0 && n <= data.len() as u64);
         let mut current = data.iter().map(|&x| x as i64).collect::<Vec<i64>>();
@@ -190,6 +152,10 @@ impl Controller{
             } else{
                 return None;
             }
+        }
+        if data[data.len()-1] > MAX_DIST_FROM_PREMOVE_TO_MOVE {
+            //println!("{}",data[data.len()-1].abs_diff(self.pre_move_location.lock().unwrap().unwrap()));
+            return None;
         }
         let coefs = Self::_get_taylor_coefs(&data, TAYLOR_POLY_ORDER, latency);
         let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/2.0, coefs[1], coefs[0]);
@@ -320,9 +286,9 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
                 let current_state = control_state.current_state.lock().unwrap().clone();
                 let can_panic = current_state == ControllerState::OutOfBrainCalibrated || current_state == ControllerState::InBrain;
                 // Check for abnormal distance
-                let too_close_to_brain = distance < MIN_DISTANCE_BRAIN_TO_ARM_NM;
+                let too_close_to_brain = distance < MIN_DISTANCE_BRAIN_TO_ARM_NM/2;
                 if too_close_to_brain && can_panic {
-                    println!("Too close to brain");
+                    println!("Too close to brain: {}", distance);
                     transition_state(control_state.clone(), ControllerState::Panic, false);
                 }
                 else if can_panic && control_state.is_abnormal_distance(distance) {
@@ -435,24 +401,24 @@ async fn calibrate(control_state: Arc<Controller>) {
         sleep(Duration::from_millis(10)).await;
     }
     move_bot(control_state.clone(), &Move::InserterZ(control_state.pre_move_location.lock().unwrap().unwrap()), ControllerState::OutOfBrainUncalibrated, false).await;
-    control_state.clear_distance_queue().await;
-    loop{
-        {
-            let distance_queue = control_state.distance_queue.lock().unwrap();
-            let distance_time_queue = control_state.distance_time_queue.lock().unwrap();
-            let mut arima = control_state.arima.lock().unwrap();
-            if distance_queue.len() >= CALIBRATION_SAMPLES.try_into().unwrap() && distance_queue.front().unwrap().is_ok() && *distance_time_queue.front().unwrap() >= calibration_init {
-                let mut trained_arima = ARIMA::new(MIN_CALIBRATION_TRAINING_POINTS);
-                println!("Training ARIMA");
-                let success = trained_arima.train_u64(&distance_queue);
-                if success {
-                    *arima = Some(trained_arima);
-                    break;   
-                }
-            }
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
+    // control_state.clear_distance_queue().await;
+    // loop{
+    //     {
+    //         let distance_queue = control_state.distance_queue.lock().unwrap();
+    //         let distance_time_queue = control_state.distance_time_queue.lock().unwrap();
+    //         let mut arima = control_state.arima.lock().unwrap();
+    //         if distance_queue.len() >= CALIBRATION_SAMPLES.try_into().unwrap() && distance_queue.front().unwrap().is_ok() && *distance_time_queue.front().unwrap() >= calibration_init {
+    //             let mut trained_arima = ARIMA::new(MIN_CALIBRATION_TRAINING_POINTS);
+    //             println!("Training ARIMA");
+    //             let success = trained_arima.train_u64(&distance_queue);
+    //             if success {
+    //                 *arima = Some(trained_arima);
+    //                 break;   
+    //             }
+    //         }
+    //     }
+    //     sleep(Duration::from_millis(10)).await;
+    // }
     move_bot(control_state.clone(), &Move::NeedleZ(0), ControllerState::OutOfBrainCalibrated, false).await;
     control_state.clear_distance_queue().await;
     println!("---------------------------------------------------------------------------------------------------------------------------------------");
@@ -505,7 +471,6 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
     assert!(commanded_depth >= COMMANDED_DEPTH_MIN_NM && commanded_depth <= COMMANDED_DEPTH_MAX_NM);
     let pos = control_state.get_robot_state().await.unwrap();
     assert!(pos.needle_z == 0 && pos.inserter_z == control_state.pre_move_location.lock().unwrap().unwrap(), "Needle not at zero, instead at: {:?}", pos);
-    assert!(control_state.arima.lock().unwrap().is_some() && control_state.arima.lock().unwrap().as_ref().unwrap().is_trained(), "ARIMA not trained {}", control_state.arima.lock().unwrap().is_some());
     let init_time = Instant::now();
     while !control_state.in_panic() && Instant::now().duration_since(init_time).as_millis() < MAX_IB_TIME.into() {
         let Some(relative_position) = control_state.get_move_location(commanded_depth) else{
