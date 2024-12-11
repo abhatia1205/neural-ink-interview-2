@@ -4,6 +4,7 @@ use tokio::time::{sleep, Duration, Instant};
 use std::sync::{Mutex,Arc}; //Arc;
 use std::collections::VecDeque;
 use roots::find_roots_quartic;
+use roots::find_roots_quadratic;
 use roots::Roots;
 
 const CALIBRATION_SAMPLES: u64 = 500;
@@ -13,16 +14,18 @@ const MAX_STATES: u64 = 100;
 const MAX_IB_TIME: u64 = 30_000; // HAS TO CHANGE
 const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 5;
 const MAX_PREDICTION_ERROR_NM: u64 = 50_000;
-const MAX_LATENCY_MS: u64 = 30;
-const MAX_LATENCY_STD_MS: u64 = 3;
-const TAYLOR_POLY_ORDER: u64 = 4; //must stay 4 unless get move location function is changed
-const MAX_DIST_FROM_PREMOVE_TO_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM + 10_000;
+
 const OCT_POLL_MILLIS: u64 = 5;
 const OCT_LATENCY_MEAN: u64 = 15;
 const ROBOT_STATE_POLL_MILLIS: u64 = 5;
 const NEEDLE_ACCELERATION_NM_MS: i64 = 250;
 const COMMANDED_DEPTH_MIN_NM: u64 = 3_000_000;
 const COMMANDED_DEPTH_MAX_NM: u64 = 7_000_000;
+
+const MAX_LATENCY_MS: u64 = 30;
+const MAX_LATENCY_STD_MS: u64 = 3;
+const TAYLOR_POLY_ORDER: u64 = 2; //must stay 4 unless get move location function is changed
+const MAX_DIST_FROM_PREMOVE_TO_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM + 10_000;
 
 
 #[derive(PartialEq, Clone, Copy)]
@@ -105,23 +108,22 @@ impl Controller{
     fn _get_taylor_coefs(data: &Vec<u64>, n: u64, latency: f64) -> Vec<f64>{
         assert!(n > 0 && n <= data.len() as u64);
         let mut current = data.iter().map(|&x| x as f64).collect::<Vec<f64>>();
-        return vec![200000.0, -29.79, 9.496, 0.00073, -0.00002699];
-        // let mut coefs = Vec::new();
-        // coefs.push(current[current.len() - 1] as f64);
-        // let mut factorial = 1;
+        let mut coefs = Vec::new();
+        coefs.push(current[current.len() - 1] as f64);
+        let mut factorial = 1;
 
-        // // Apply the backward difference n times
-        // for i in 0..n {
-        //     // Compute the backward difference: Δf(x) = f(x) - f(x-1)
-        //     factorial *= i+1;
-        //     let next = current
-        //         .windows(2)
-        //         .map(|w| (w[1] - w[0]) as f64/ latency as f64) // (w[1] - w[0])
-        //         .collect::<Vec<f64>>();
-        //     coefs.push(next[next.len() - 1] as f64 / factorial as f64);
-        //     current = next;
-        // }
-        // return coefs;
+        // Apply the backward difference n times
+        for i in 0..n {
+            // Compute the backward difference: Δf(x) = f(x) - f(x-1)
+            factorial *= i+1;
+            let next = current
+                .windows(2)
+                .map(|w| (w[1] - w[0]) as f64/ latency as f64) // (w[1] - w[0])
+                .collect::<Vec<f64>>();
+            coefs.push(next[next.len() - 1] as f64 / factorial as f64);
+            current = next;
+        }
+        return coefs;
     }
 
     fn get_move_location(&self, commanded_depth: u64) -> Option<u64> {
@@ -163,11 +165,9 @@ impl Controller{
         println!("Times: {:?}", times);
         let coefs = Self::_get_taylor_coefs(&data, TAYLOR_POLY_ORDER, latency_mean);
         println!("Coefs: {:?}", coefs);
-        let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
-        let pos = |mut x: f64|{
-            200_000.0 + commanded_depth as f64 + 9.496*x*x + 0.00073*x*x*x + -0.00002699*x*x*x*x
-            //coefs[0] + commanded_depth as f64 + coefs[1]*x + coefs[2]*x*x + coefs[3]*x*x*x + coefs[4]*x*x*x*x
-        };
+        //let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
+        let roots = find_roots_quadratic(coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
+        let pos = |mut x: f64| coefs[0] + commanded_depth as f64 + coefs[1]*x + coefs[2]*x*x;
         match roots{
             Roots::No(_) => None,
             Roots::One(x) => {
@@ -180,26 +180,7 @@ impl Controller{
                 println!(" 2 Roots: {}", f64::max(x[0], x[1]));
                 Some(pos(f64::max(x[0], x[1])) as u64)
             },
-            Roots::Three(mut x) => {
-                x.sort_by(|a,b| a.partial_cmp(b).unwrap());
-                for i in 0..2{
-                    if x[i] > 0.0{
-                        println!(" 3 Roots: {}",x[i]);
-                        return Some(pos(x[i]) as u64);
-                    }
-                }
-                return None;
-            },
-            Roots::Four(mut x) => {
-                x.sort_by(|a,b| a.partial_cmp(b).unwrap());
-                for i in 0..2{
-                    if x[i] > 0.0{
-                        println!(" 4 Roots: {}", x[i]);
-                        return Some(pos(x[i]) as u64);
-                    }
-                }
-            return None;
-            }   
+            _ => panic!("3 roots")
         }
     }
 
@@ -244,19 +225,16 @@ impl Controller{
         let diff = distance - prediction;
         let diff = diff.abs();
         if diff > MAX_PREDICTION_ERROR_NM as f64{
-            println!("ABNORMAL DISTANCE: {}", distance);
-            {
-                let distance_q = self.distance_queue.lock().unwrap();
-                let time_q = self.distance_time_queue.lock().unwrap();
-                println!("Previous State: {}, Recent State: {}, Prediction: {}, Time since recent state: {}, Actual distance: {} Current State: {}",
-                    distance_q.get(distance_q.len() - 2).unwrap().clone().unwrap(),
-                    distance_q.get(distance_q.len() - 1).unwrap().clone().unwrap(),
-                    prediction,
-                    time_q.get(time_q.len() - 1).unwrap().elapsed().as_millis(),
-                    distance,
-                    self.current_state.lock().unwrap()
-                );
-            }
+            let distance_q = self.distance_queue.lock().unwrap();
+            let time_q = self.distance_time_queue.lock().unwrap();
+            println!("ABNORMAL DISTANCE:: Previous State: {}, Recent State: {}, Prediction: {}, Time since recent state: {}, Actual distance: {} Current State: {}",
+                distance_q.get(distance_q.len() - 2).unwrap().clone().unwrap(),
+                distance_q.get(distance_q.len() - 1).unwrap().clone().unwrap(),
+                prediction,
+                time_q.get(time_q.len() - 1).unwrap().elapsed().as_millis(),
+                distance,
+                self.current_state.lock().unwrap()
+            );
         }
         return diff > MAX_PREDICTION_ERROR_NM as f64;
     }
@@ -412,7 +390,7 @@ async fn calibrate(control_state: Arc<Controller>) {
 
 pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
     println!("Starting controller...");
-    assert!(OCT_LATENCY_MEAN/OCT_POLL_MILLIS > 1);
+    assert!(OCT_LATENCY_MEAN < 15);
     let (tx, rx) = mpsc::channel::<Result<u64, OCTError>>(20);
     tokio::spawn({let me = Arc::clone(&control_state);
     async move {
@@ -463,7 +441,6 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
             sleep(Duration::from_millis(15)).await;
             continue;
         };
-        assert!(relative_position > 0 && relative_position < 10_000_000, "Invalid position: {}", relative_position);
         let response = {
             control_state.command_move(&Move::NeedleZ(relative_position)).await
         };
@@ -474,6 +451,7 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
             }
             Err(RobotError::MoveError{..}) | Err(RobotError::ConnectionError{..}) => {
                 println!("Error in moving to position: {}", relative_position);
+                break;
             }
             Err(RobotError::PositionError{..}) => {
                 die(control_state.clone());
@@ -491,9 +469,7 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
 
 async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: ControllerState, from_panic: bool) -> () {
     loop {
-        let response = 
-            control_state.command_move(command).await;
-        //print!("THERES NO DEADLOCK");
+        let response = control_state.command_move(command).await;
         match response {
             Ok(_) => {
                 break;
