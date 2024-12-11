@@ -14,7 +14,7 @@ fn main() {
     let (move_tx, move_rx) = tokio::sync::mpsc::channel(100);
     let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(100);
 
-    let robot = Arc::new(Mutex::new(RobotArm::new(0)));
+    let robot = Arc::new(Mutex::new(RobotArm::new(0, false, true)));
     let robot_clone = Arc::clone(&robot);
     let controller = controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx);
 

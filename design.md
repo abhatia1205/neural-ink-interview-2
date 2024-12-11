@@ -25,7 +25,7 @@ The robot state poller is veyr simple: It periodically polls the robot for its s
 
 ## Calibration
 
-After some very minimal analysis, it seems like an ARIMA model actually learns the dynamics of the brian movement very well. Due to ease of implementation of an ARIMA (not dealing with Fourier Analysis is nice), and the aforementioned queue design, it should work exceedilngly will in a Kalman filter
+After some very minimal analysis, it seems like an ARIMA model actually learns the dynamics of the brian movement very well. Due to ease of implementation of an ARIMA (not dealing with Fourier Analysis is nice), and the aforementioned queue design, it should work exceedilngly will in a Kalman filter. 
 
 To have an idea of exactly how we want to control the robot, we must have robust predictions for the brain's movement. To do this, we need a calibration period, where the robot takes a 10 second recording of the brain's movement and creates a function to predict where the brain should be relative to the robot's insert_z at any given point. Given the smoothness of the 
 
@@ -41,3 +41,7 @@ There are 4 states: Dead, Out of Brain Uncalibrated, Out of Brain Calibrated, an
 ### Threading considerations wrt moving
 
 Consider the situation when we are about to move and the brain distance function panics. If we use a single threaded application, there  isn't a problem because the state we have is inherently atomic since one thread means there is no contention. However, consider the case where we have one brain distance polling thread and one movement control thread. Here, we have a contention problem: If we want to guarantee atomicity with respect to state when we move (i.e. that we are in the state we expect to be in when we move), we must lock the state and move, holding the lock across an await. This doesnt seem smart because it makes the latency on panicing very high, since to panic, we must acquire he lock around the state, which could be locked across an await. The other option is to not to guarantee that you are in the state you expect to be when you call command_move - ie, you could also be in a panic state. This would allow the move on the robot to be called in the panic state after a move to zero from the panic handler is called, which also seems unideal but better than the previous option. This is becuase the panic handler will loop in always moving the robot out of the brain, so we can guarantee evetual consistency on the robot getting out. 
+
+# Kalman Filter thoughts
+
+Since we do not want to do open-loop control on the robot in the brain, we should somehow incorporate a Kalman filter. This would allow us to perform close loop control, let our predictions be 5-10ms out instead of seconds, and generally just be more precise. The Kalman filter could also model the time delay on getting the brains location as noise. Instead of moving the robot in one shot into the brain, we could move it a few microns, receive and update state in the Kalman filter, and move again.

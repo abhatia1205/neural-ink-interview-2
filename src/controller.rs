@@ -12,11 +12,11 @@ const MIN_DISTANCE_BRAIN_TO_ARM_NM: u64 = 200_000;
 const MAX_DISTANCES: u64 = 100;
 const MAX_STATES: u64 = 100;
 const MAX_IB_TIME: u64 = 30_000; // HAS TO CHANGE
-const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 5;
+const MAX_CONSECUTIVE_PREDICTION_ERRORS: u64 = 20;
 const MAX_PREDICTION_ERROR_NM: u64 = 50_000;
 
 const OCT_POLL_MILLIS: u64 = 5;
-const OCT_LATENCY_MEAN: u64 = 15;
+const OCT_LATENCY_MS: u64 = 15;
 const ROBOT_STATE_POLL_MILLIS: u64 = 5;
 const NEEDLE_ACCELERATION_NM_MS: i64 = 250;
 const COMMANDED_DEPTH_MIN_NM: u64 = 3_000_000;
@@ -34,6 +34,12 @@ enum ControllerState {
     OutOfBrainUncalibrated,
     OutOfBrainCalibrated,
     InBrain,
+    Panic
+}
+
+enum InBrainOutcome{
+    Success,
+    Failure,
     Panic
 }
 
@@ -61,6 +67,7 @@ pub struct Controller {
     state_tx: mpsc::Sender<((), oneshot::Sender<Result<RobotState, RobotError>>)>, //mpsc::Sender<()>,
     move_tx: mpsc::Sender<(Move, oneshot::Sender<Result<(), RobotError>>)>, //mpsc::Sender<Move>,
     dead_tx: mpsc::Sender<()>,
+    pub outcomes: Mutex<Vec<bool>>
 }
 
 impl Controller{
@@ -79,7 +86,8 @@ impl Controller{
             distance_tx,
             state_tx,
             move_tx,
-            dead_tx
+            dead_tx,
+            outcomes:Mutex::new(Vec::new())
         }
     }
 
@@ -137,11 +145,14 @@ impl Controller{
         let Some(new_data) = data.last_chunk_mut::<data_len>() else{
             return None;
         };
-        let mut time_data = Vec::from(time_queue.clone());
-        let Some(new_time_data) = time_data.last_chunk_mut::<data_len>() else{
+        let mut vec = Vec::from(time_queue.clone());
+        let Some(mut time_data) = vec.last_chunk_mut::<data_len>() else{
             return None;
         };
-        let times = new_time_data.windows(2).map(|w| w[1].duration_since(w[0]).as_millis() as f64).collect::<Vec<f64>>();
+        if Instant::now().duration_since(time_data[time_data.len()-1]).as_millis() as u64 > MAX_LATENCY_MS{
+            return None;
+        }
+        let times = time_data.windows(2).map(|w| w[1].duration_since(w[0]).as_millis() as f64).collect::<Vec<f64>>();
         let times_len = times.len() as f64;
         let latency_mean = times.iter().sum::<f64>() / times_len;
         let latency_std = (times.clone().into_iter().map(|x| (x - latency_mean).powi(2)).sum::<f64>() / times_len).sqrt();
@@ -167,7 +178,10 @@ impl Controller{
         println!("Coefs: {:?}", coefs);
         //let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
         let roots = find_roots_quadratic(coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
-        let pos = |mut x: f64| coefs[0] + commanded_depth as f64 + coefs[1]*x + coefs[2]*x*x;
+        let pos = |mut x: f64|{
+            //x += OCT_LATENCY_MS as f64;
+            coefs[0] + commanded_depth as f64 + coefs[1]*x + coefs[2]*x*x
+        };
         match roots{
             Roots::No(_) => None,
             Roots::One(x) => {
@@ -291,9 +305,7 @@ async fn process_distances(control_state: Arc<Controller>, mut rx: mpsc::Receive
                     *consecutive_errors = 0;
                 }
             }
-            Err(_) => {
-                println!("Received error in processing distance");
-            }
+            Err(_) => {}
         };
 
         // Update queues
@@ -390,7 +402,6 @@ async fn calibrate(control_state: Arc<Controller>) {
 
 pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
     println!("Starting controller...");
-    assert!(OCT_LATENCY_MEAN < 15);
     let (tx, rx) = mpsc::channel::<Result<u64, OCTError>>(20);
     tokio::spawn({let me = Arc::clone(&control_state);
     async move {
@@ -410,17 +421,32 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
         let mut state_changer = control_state.current_state.lock().unwrap();
         *state_changer = ControllerState::OutOfBrainUncalibrated;
     }
-    let mut outcomes = Vec::<bool>::new();
     for (_i, depth) in commanded_depth.iter().enumerate() {
-        if control_state.in_panic(){
-            panic(control_state.clone()).await;
+        loop{
+            if control_state.in_panic(){
+                panic(control_state.clone()).await;
+            }
+            if control_state.out_of_brain_uncalibrated(){
+                calibrate(control_state.clone()).await;
+                println!("Calibrated");
+            }
+            assert!(control_state.out_of_brain_calibrated(), "Expected out of brain calibrated but was: {}", control_state.current_state.lock().unwrap());
+            assert!(control_state.get_robot_state().await.unwrap().needle_z == 0);
+            println!("Inserting {} thread", _i);
+            let outcome = insert_ib_open_loop(control_state.clone(), *depth).await;
+            match outcome {
+                InBrainOutcome::Success => {
+                    control_state.outcomes.lock().unwrap().push(true);
+                    break;
+                }
+                InBrainOutcome::Failure => {
+                    control_state.outcomes.lock().unwrap().push(false);
+                    println!("Failure");
+                    break;
+                }
+                _ => {}
+            }
         }
-        if control_state.out_of_brain_uncalibrated(){
-            calibrate(control_state.clone()).await;
-            println!("Calibrated");
-        }
-        assert!(control_state.out_of_brain_calibrated());
-        outcomes.push(insert_ib_open_loop(control_state.clone(), *depth).await);
     }
     transition_state(control_state.clone(), ControllerState::Dead, false);
     println!("Done");
@@ -429,9 +455,11 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
 
 async fn retract_ib(control_state: Arc<Controller>) {
     move_bot(control_state.clone(), &Move::NeedleZ(0), ControllerState::OutOfBrainCalibrated, false).await;
+    assert!(control_state.get_robot_state().await.unwrap().needle_z == 0);
+    assert!(*control_state.current_state.lock().unwrap() == ControllerState::OutOfBrainCalibrated);
 }
 
-async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u64) -> bool {
+async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u64) -> InBrainOutcome {
     assert!(commanded_depth >= COMMANDED_DEPTH_MIN_NM && commanded_depth <= COMMANDED_DEPTH_MAX_NM);
     let pos = control_state.get_robot_state().await.unwrap();
     assert!(pos.needle_z == 0 && pos.inserter_z == control_state.pre_move_location.lock().unwrap().unwrap(), "Needle not at zero, instead at: {:?}", pos);
@@ -446,25 +474,27 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
         };
         match response {
             Ok(_) => {
+                println!("Success full in brain move");
                 retract_ib(control_state.clone()).await;
-                return true;
+                return InBrainOutcome::Success;
             }
             Err(RobotError::MoveError{..}) | Err(RobotError::ConnectionError{..}) => {
-                println!("Error in moving to position: {}", relative_position);
-                break;
+                println!("Connection error in moving to position: {}", relative_position);
+                retract_ib(control_state.clone()).await;
+                return InBrainOutcome::Failure;
             }
             Err(RobotError::PositionError{..}) => {
                 die(control_state.clone());
+                break;
             }
         }
-        tokio::task::yield_now().await;
     }
-    if control_state.in_panic(){
+    if(!control_state.in_panic()){
         panic(control_state.clone()).await;
     }else{
         retract_ib(control_state.clone()).await;
     }
-    return false;
+    return InBrainOutcome::Failure;
 }
 
 async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: ControllerState, from_panic: bool) -> () {
@@ -483,6 +513,7 @@ async fn move_bot(control_state: Arc<Controller>, command: &Move, next_state: Co
         }
         tokio::task::yield_now().await;
     }
+    println!("Moved to position: {}", command);
     transition_state(control_state,next_state, from_panic);
 }
 
