@@ -1,9 +1,8 @@
-use crate::interface::{RobotError, RobotState, OCTService, OCTError, Move, Robot}; //OCTError;
+use crate::interface::{RobotError, RobotState, OCTService, OCTError, Move, Robot};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration, Instant};
-use std::sync::{Mutex,Arc}; //Arc;
+use std::sync::{Mutex,Arc};
 use std::collections::VecDeque;
-use roots::find_roots_quartic;
 use roots::find_roots_quadratic;
 use roots::Roots;
 
@@ -24,7 +23,7 @@ const COMMANDED_DEPTH_MAX_NM: u64 = 7_000_000;
 
 const MAX_LATENCY_MS: u64 = 30;
 const MAX_LATENCY_STD_MS: u64 = 3;
-const TAYLOR_POLY_ORDER: u64 = 2; //must stay 4 unless get move location function is changed
+const TAYLOR_POLY_ORDER: u64 = 2; 
 const MAX_DIST_FROM_PREMOVE_TO_MOVE: u64 = MIN_DISTANCE_BRAIN_TO_ARM_NM + 10_000;
 
 
@@ -422,30 +421,26 @@ pub async fn start(control_state: Arc<Controller>, commanded_depth: &Vec<u64>) {
         *state_changer = ControllerState::OutOfBrainUncalibrated;
     }
     for (_i, depth) in commanded_depth.iter().enumerate() {
-        loop{
-            if control_state.in_panic(){
-                panic(control_state.clone()).await;
+        if control_state.in_panic(){
+            panic(control_state.clone()).await;
+        }
+        if control_state.out_of_brain_uncalibrated(){
+            calibrate(control_state.clone()).await;
+            println!("Calibrated");
+        }
+        assert!(control_state.out_of_brain_calibrated(), "Expected out of brain calibrated but was: {}", control_state.current_state.lock().unwrap());
+        assert!(control_state.get_robot_state().await.unwrap().needle_z == 0);
+        println!("Inserting {} thread", _i);
+        let outcome = insert_ib_open_loop(control_state.clone(), *depth).await;
+        match outcome {
+            InBrainOutcome::Success => {
+                control_state.outcomes.lock().unwrap().push(true);
             }
-            if control_state.out_of_brain_uncalibrated(){
-                calibrate(control_state.clone()).await;
-                println!("Calibrated");
+            InBrainOutcome::Failure => {
+                control_state.outcomes.lock().unwrap().push(false);
+                println!("Failure");
             }
-            assert!(control_state.out_of_brain_calibrated(), "Expected out of brain calibrated but was: {}", control_state.current_state.lock().unwrap());
-            assert!(control_state.get_robot_state().await.unwrap().needle_z == 0);
-            println!("Inserting {} thread", _i);
-            let outcome = insert_ib_open_loop(control_state.clone(), *depth).await;
-            match outcome {
-                InBrainOutcome::Success => {
-                    control_state.outcomes.lock().unwrap().push(true);
-                    break;
-                }
-                InBrainOutcome::Failure => {
-                    control_state.outcomes.lock().unwrap().push(false);
-                    println!("Failure");
-                    break;
-                }
-                _ => {}
-            }
+            _ => {panic!("Unexpected outcome")}
         }
     }
     transition_state(control_state.clone(), ControllerState::Dead, false);
@@ -489,7 +484,7 @@ async fn insert_ib_open_loop(control_state: Arc<Controller>, commanded_depth: u6
             }
         }
     }
-    if(!control_state.in_panic()){
+    if control_state.in_panic() {
         panic(control_state.clone()).await;
     }else{
         retract_ib(control_state.clone()).await;

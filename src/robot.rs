@@ -229,6 +229,9 @@ async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, ones
                     // if(z == 0){
                     //     will_error = false;
                     // }
+                    if(z != 0){
+                        assert!(guard.state.needle_z == 0);
+                    }
                     if will_error {
                         let partial_factor: f64 = rng.gen();
                         guard.target_z = (guard.start_z as i64 + ((z as i64 - guard.start_z as i64) as f64 * partial_factor) as i64) as u64;
@@ -272,7 +275,7 @@ async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, ones
                 guard.state.inserter_z = target_z;
             } else if is_needle_move {
                 let brain_position = (guard.brain_location_fn)(guard.init_time.elapsed().as_millis() as u64) - guard.state.inserter_z;
-                if target_z > 0 {
+                if !error_scheduled && target_z != 0 {
                     assert!(guard.move_errors || brain_position < target_z, "brain position: {}, target position: {}", brain_position, target_z);
                     guard.brain_distances.push(if target_z < brain_position {0} else {target_z - brain_position});
                 }

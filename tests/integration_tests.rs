@@ -4,7 +4,7 @@ use neuralink_final::controller;
 use std::{sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::runtime::Builder;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::Instant;
 
 const PRECISION: u64 = 300_000;
 
@@ -60,8 +60,8 @@ fn test_controller_no_errors() {
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),false, false);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");
-    let mut outcomes = controller.outcomes.lock().unwrap();
-    let mut robot_distances = robot.blocking_lock().brain_distances.clone();
+    let outcomes = controller.outcomes.lock().unwrap();
+    let robot_distances = robot.blocking_lock().brain_distances.clone();
     for (i, distance) in robot_distances.iter().enumerate() {
         assert!(outcomes[i], "Move failed in no error environment for move {} with outcome {}", i, outcomes[i]);
         assert!(distance.abs_diff(distances[i]) < PRECISION, "Expected {} but got {}", distances[i], distance);
@@ -79,8 +79,8 @@ fn test_controller_distance_errors() {
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),true, false);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");
-    let mut outcomes = controller.outcomes.lock().unwrap();
-    let mut robot_distances = robot.blocking_lock().brain_distances.clone();
+    let outcomes = controller.outcomes.lock().unwrap();
+    let robot_distances = robot.blocking_lock().brain_distances.clone();
     for (i, distance) in robot_distances.iter().enumerate() {
         assert!(outcomes[i], "Move didnt succeeded in distance error environment for move {} with outcome {}", i, outcomes[i]);
         assert!(distance.abs_diff(distances[i]) < PRECISION, "Expected {} but got {}", distances[i], distance);
@@ -98,9 +98,16 @@ fn test_controller_move_errors() {
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),false, true);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");
-    let mut outcomes = controller.outcomes.lock().unwrap();
-    let mut robot_distances = robot.blocking_lock().brain_distances.clone();
-    for (i, distance) in robot_distances.iter().enumerate() {
-        assert!(!outcomes[i] ||distance.abs_diff(distances[i]) < PRECISION, "Expected {} but got {} on move {} with outcome {}", distances[i], distance, i, outcomes[i]);
+    let outcomes = controller.outcomes.lock().unwrap();
+    let robot_distances = robot.blocking_lock().brain_distances.clone();
+    let outcome_indices = outcomes.iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i).collect::<Vec<usize>>();
+    assert!(outcome_indices.len() == robot_distances.len());
+
+    for (j, i) in outcome_indices.iter().enumerate() {
+        let actual_distance = robot_distances[j];
+        let commanded_distance = distances[*i];
+        print!("{}, {}, {} ", commanded_distance, actual_distance, *i);
+        assert!(actual_distance.abs_diff(commanded_distance) < PRECISION, "Expected {} but got {}", commanded_distance, actual_distance);
     }
+
 }

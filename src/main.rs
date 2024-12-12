@@ -16,24 +16,26 @@ fn main() {
 
     let robot = Arc::new(Mutex::new(RobotArm::new(0, false, true)));
     let robot_clone = Arc::clone(&robot);
-    let controller = controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx);
+    let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx));
+    let controller_clone = Arc::clone(&controller);
+    let commands = vec![
+        3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
+        3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
+        4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
+        4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
+        5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
+        5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
+    let commands_clone = commands.clone();
 
      // Create and run the first runtime on its own thread
-    let handle_one = thread::spawn(|| {
+    let handle_one = thread::spawn(move || {
         let rt = Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         
         rt.block_on(async {
-            // These async functions run on "Thread 1"
-            controller::start(Arc::new(controller), &vec![
-                                                        3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
-                                                        3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
-                                                        4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
-                                                        4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
-                                                        5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
-                                                        5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000]).await
+            controller::start(controller, &commands).await
         });
     });
 
@@ -44,12 +46,7 @@ fn main() {
             .unwrap();
             
         rt.block_on(async move {
-            // Because run now takes &mut self, 
-            // we can borrow thread_two_context mutably here.
             robot::start(distance_rx, state_rx, move_rx, dead_rx,robot).await; 
-
-            // After `run()` completes, we could still use `thread_two_context` if we wanted to,
-            // or call `run()` again.
         });
     });
 
@@ -57,7 +54,21 @@ fn main() {
     handle_one.join().unwrap();
     handle_two.join().unwrap();
 
+    //Filter indices with true value from controller_clone.outcomes
+    let outcome_indices = controller_clone.outcomes.lock().unwrap().iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i).collect::<Vec<usize>>();
+    assert!(outcome_indices.len() == robot_clone.blocking_lock().brain_distances.len());
+
+    for (j, i) in outcome_indices.iter().enumerate() {
+        let actual_distance = robot_clone.blocking_lock().brain_distances[j];
+        let commanded_distance = commands_clone[*i];
+        print!("{}, {}, {} ", commanded_distance, actual_distance, *i);
+    }
+
     for i in robot_clone.blocking_lock().brain_distances.clone() {
+        print!("{}, ", i);
+    }
+
+    for i in controller_clone.outcomes.lock().unwrap().clone() {
         print!("{}, ", i);
     }
 
