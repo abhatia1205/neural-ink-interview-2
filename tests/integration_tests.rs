@@ -9,7 +9,6 @@ use tokio::time::Instant;
 const PRECISION: u64 = 300_000;
 
 fn make_state(commands: Vec<u64>,distance_errors: bool, move_errors: bool) -> (Arc<controller::Controller>, Arc<Mutex<RobotArm>>) {
-    println!("Hello, world!");
     let (distance_tx, distance_rx) = tokio::sync::mpsc::channel(100);
     let (state_tx, state_rx) = tokio::sync::mpsc::channel(100);
     let (move_tx, move_rx) = tokio::sync::mpsc::channel(100);
@@ -52,11 +51,11 @@ fn make_state(commands: Vec<u64>,distance_errors: bool, move_errors: bool) -> (A
 #[test]
 fn test_controller_no_errors() {
     let distances = vec![3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
-                                    3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
-                                    4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
-                                    4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
-                                    5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
-                                    5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
+                                3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
+                                4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
+                                4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
+                                5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
+                                5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),false, false);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");
@@ -71,11 +70,11 @@ fn test_controller_no_errors() {
 #[test]
 fn test_controller_distance_errors() {
     let distances = vec![3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
-                                    3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
-                                    4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
-                                    4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
-                                    5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
-                                    5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
+                                3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
+                                4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
+                                4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
+                                5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
+                                5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),true, false);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");
@@ -90,11 +89,11 @@ fn test_controller_distance_errors() {
 #[test]
 fn test_controller_move_errors() {
     let distances = vec![3_100_000, 3_200_000, 3_300_000, 3_400_000, 3_500_000,
-                                    3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
-                                    4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
-                                    4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
-                                    5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
-                                    5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
+                                3_600_000, 3_700_000, 3_800_000, 3_900_000, 4_000_000,
+                                4_100_000, 4_200_000, 4_300_000, 4_400_000, 4_500_000,
+                                4_600_000, 4_700_000, 4_800_000, 4_900_000, 5_000_000,
+                                5_100_000, 5_200_000, 5_300_000, 5_400_000, 5_500_000,
+                                5_600_000, 5_700_000, 5_800_000, 5_900_000, 6_000_000];
     let time = Instant::now();
     let (controller, robot) = make_state(distances.clone(),false, true);
     assert!(time.elapsed().as_secs() < distances.len() as u64 * 10, "Test took longer than expected");

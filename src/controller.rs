@@ -175,7 +175,6 @@ impl Controller{
         println!("Times: {:?}", times);
         let coefs = Self::_get_taylor_coefs(&data, TAYLOR_POLY_ORDER, latency_mean);
         println!("Coefs: {:?}", coefs);
-        //let roots = find_roots_quartic(coefs[4], coefs[3], coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
         let roots = find_roots_quadratic(coefs[2] - NEEDLE_ACCELERATION_NM_MS as f64/4.0, coefs[1], coefs[0]+commanded_depth as f64);
         let pos = |mut x: f64|{
             //x += OCT_LATENCY_MS as f64;
@@ -215,8 +214,7 @@ impl Controller{
         }
         let current_time = time_queue.get(length-1).unwrap();
         let previous_time = time_queue.get(length-2).unwrap();
-        let time_diff = current_time.duration_since(*previous_time);
-        let time_diff = time_diff.as_millis() as f64;
+        let time_diff = current_time.duration_since(*previous_time).as_millis() as f64;
         let distance_diff = current.clone().unwrap() as f64 - previous.clone().unwrap() as f64;
         let velocity = distance_diff / time_diff;
         let elapsed_time = (current_time.elapsed() + future_duration).as_millis() as f64;
