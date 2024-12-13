@@ -220,7 +220,6 @@ impl<P: BrainPredictor> Controller<P>{
         let distances = Vec::from(info.distance_queue.clone());
         let times = Vec::from(info.distance_time_queue.clone());
         let Some(brain_position_function) = self.predictor.predict(&distances, &times, false) else {
-            println!("Len of distance queue is: {}", info.distance_queue.len());
             return true;
         };
         let prediction = brain_position_function(info.distance_time_queue[info.distance_time_queue.len()-1].elapsed().as_millis() as f64);
@@ -405,7 +404,6 @@ async fn process_distances<P: BrainPredictor>(control_state: Arc<Controller<P>>,
                     transition_state(control_state.clone(), ControllerState::Panic, false);
                 }
                 else if can_panic && control_state.is_abnormal_distance(distance) {
-                    println!("Can panic {}", can_panic);
                     control_state.add_error();
                     if control_state.get_consecutive_errors() > MAX_CONSECUTIVE_PREDICTION_ERRORS && can_panic
                     {
