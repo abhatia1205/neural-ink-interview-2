@@ -196,7 +196,7 @@ impl<P: BrainPredictor> Controller<P>{
             return None;
         };
         //We only move the robot if the brain is sufficiently close to the needle before moving
-        if info.notified_distances.last().cloned().unwrap().unwrap() > MAX_DIST_FROM_PREMOVE_TO_MOVE {
+        if info.notified_distances.last().cloned().unwrap().is_err() || info.notified_distances.last().cloned().unwrap().unwrap() > MAX_DIST_FROM_PREMOVE_TO_MOVE {
             println!("We are too far away from the brain to move");
             return None;
         }
@@ -225,15 +225,7 @@ impl<P: BrainPredictor> Controller<P>{
         let prediction = brain_position_function(info.distance_time_queue[info.distance_time_queue.len()-1].elapsed().as_millis() as f64);
         let diff = (distance as f64 - prediction).abs();
         if diff > MAX_PREDICTION_ERROR_NM as f64{
-            println!("Diff was: {}", diff);
-            println!("ABNORMAL DISTANCE:: Previous State: {}, Recent State: {}, Prediction: {}, Time since recent state: {}, Actual distance: {} Current State: {}",
-                info.distance_queue.get(info.distance_queue.len() - 2).unwrap().clone().unwrap(),
-                info.distance_queue.get(info.distance_queue.len() - 1).unwrap().clone().unwrap(),
-                prediction,
-                info.distance_time_queue.get(info.distance_time_queue.len() - 1).unwrap().elapsed().as_millis(),
-                distance,
-                info.current_state
-            );
+            println!("ABNORMAL PREDICTION: Diff was: {}", diff);
         }
         return diff > MAX_PREDICTION_ERROR_NM as f64;
     }

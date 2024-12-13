@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio::runtime::Builder;
 use predictor::TaylorQuadraticApproximator;
+use predictor::QuadraticRegression;
 use predictor::OraclePredictor;
 use tokio::task::LocalSet;
 
@@ -24,7 +25,7 @@ fn main() {
     let robot = Arc::new(Mutex::new(RobotArm::new(0, true, false)));
     let robot_clone = Arc::clone(&robot);
     //Creates the controller simulation
-    let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx, TaylorQuadraticApproximator{}));
+    let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx, QuadraticRegression{}));
     let controller_clone = Arc::clone(&controller);
     //Commanded depth in nanometers
     let commands = vec![
