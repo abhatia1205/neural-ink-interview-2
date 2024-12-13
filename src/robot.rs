@@ -30,12 +30,19 @@ pub struct RobotArm {
 }
 
 impl RobotArm {
+    /// Creates a new `RobotArm` with the given initial z position, distance errors flag, and move errors flag.
+    ///
+    /// The `distance_errors` flag indicates whether or not the `brain_location_fn` should return incorrect values.
+    ///
+    /// The `move_errors` flag indicates whether or not a move should fail to actually move the robot. If this flag is set,
+    /// the robot will instead move to a position that is 20% of the way to the target position.
     pub fn new(initial_z: u64, distance_errors: bool, move_errors: bool) -> RobotArm {
         RobotArm {
             distance_errors,
             state_errors: false,
             move_errors,
             init_time: Instant::now(),
+            //Arbitrary function to mock brains location
             brain_location_fn: |x: u64| {
                 (7_000_000.0
                     + 500_000.0 * (6.0 * x as f64/1000.0).sin()
@@ -153,6 +160,7 @@ impl RobotArm {
     }
 
     fn _get_state(&self) -> Result<RobotState, RobotError> {
+        //If moving, interpolate our current position
         if self.is_moving {
             let elapsed = self.last_move_time.unwrap().elapsed();
             let mut state = self.state.clone();
@@ -165,7 +173,6 @@ impl RobotArm {
                     self.total_move_duration,
                 );
                 assert!(pos >= 0);
-                assert!(self.total_move_duration <= Duration::from_secs(2));
                 state.inserter_z = pos as u64;
             } else if self.is_needle_move {
                 // NeedleZ move: interpolate needle_z only, inserter_z unchanged
@@ -180,12 +187,15 @@ impl RobotArm {
             }
             return Ok(state.clone());
         } else {
+            //If not moving, return current state
             return Ok(self.state.clone());
         }
     }
 
 }
 
+/// Get the current state of the robot
+/// We know this function is fast
 async fn get_state(robot: Arc<Mutex<RobotArm>>, mut state_rx: mpsc::Receiver<((), oneshot::Sender<Result<RobotState, RobotError>>)>) -> () {
     println!("get_state");
     while let Some((_, tx)) = state_rx.recv().await {
@@ -195,6 +205,8 @@ async fn get_state(robot: Arc<Mutex<RobotArm>>, mut state_rx: mpsc::Receiver<(()
     }
 }
 
+/// Move the robot. Decide if an error will occur before starting the move. If so, pick a partial error position and move there, 
+/// then return the error. Otherwise, move to the target position, which is the commanded depth.
 async fn mv(robot: Arc<Mutex<RobotArm>>, mut move_rx: mpsc::Receiver<(Move, oneshot::Sender<Result<(), RobotError>>)>,) -> (){
     println!("mv");
     while let Some((move_cmd, tx)) = move_rx.recv().await {
@@ -307,12 +319,13 @@ pub async fn start(distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, 
     let r2 = Arc::clone(&robot);
     let r3 = Arc::clone(&robot);
     println!("Starting robot...");
-    tokio::task::spawn(get_distance(r1, distance_rx));
-    tokio::task::spawn(mv(r2, move_rx));
-    tokio::task::spawn(get_state(r3, state_rx));
+    tokio::task::spawn_local(get_distance(r1, distance_rx));
+    tokio::task::spawn_local(mv(r2, move_rx));
+    tokio::task::spawn_local(get_state(r3, state_rx));
     dead_rx.recv().await;
 }
 
+//Using a function defined in the struct, at any query, calculate the brains simulate position in real time and return the value
 async fn get_distance(robot: Arc<Mutex<RobotArm>>, mut distance_rx: mpsc::Receiver<((), oneshot::Sender<Result<u64, OCTError>>)>,) -> () {
     println!("get_distance");
     while let Some((_, tx)) = distance_rx.recv().await {
@@ -321,6 +334,7 @@ async fn get_distance(robot: Arc<Mutex<RobotArm>>, mut distance_rx: mpsc::Receiv
         {
             let guard = robot.lock().await;
             let robot_position = guard._get_state().unwrap().inserter_z;
+            //Brains position in real time
             let brain_position = (guard.brain_location_fn)(guard.init_time.elapsed().as_millis() as u64);
             assert!(brain_position > 0 && brain_position > robot_position, "brain position: {}, robot position: {}", brain_position, robot_position);
             (brain_position - robot_position, guard.distance_errors)

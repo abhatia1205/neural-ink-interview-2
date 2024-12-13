@@ -10,10 +10,9 @@ First we must estimate some important values to inform our design process. We kn
 4) The average size of a neuron is 20 microns (according to Google)
 5) Assume we know the brain's position entirely accurately, and the robot has nanometer precision. Assume we also have perfect knowledge of the brians movement dynamics. Then, in terms of timing, to get ~20 micron accuracy and assuming the brain is moving at its MAXIMUM velocity of 15mm/s, we need ~1ms precision in our threading infrastructure.
 6) Assume we have nanosecond precision on our commands, and nanometer precision on our distance estimates. Then, we must have 20 micron accuracy on the position of the brain within 15ms. The brain moves about 15mm/s, in 15 ms, would move about 200 microns. Thus, we need to guarantee 90% accuracy from a MAE perspective, 15ms out.
-7) Latency to getting the robot position is minimal (100s of microseonds)
+7) Latency to getting the robot position is minimal (10s of microseonds)
 
-5 and 6 are our two main goals, although we will focus on the time goal primarily. Goal 6 is more of a modelling challenge, but for now, I will use a modified Kalman filter with a ~~Fourier Estimate~~ ARIMA as my model.
-
+5 and 6 are our two main goals, although we will focus on the time goal primarily. Goal 6 is more of a modelling challenge, but for now, I will use a modified Kalman filter with a Fourier Estimate as my model. The Kalman filter will predict the location of the needle, and the control matrix in the Kalman filter will try to get the state to the commanded depth.
 
 
 ## Overall Design
@@ -25,9 +24,13 @@ The robot state poller is veyr simple: It periodically polls the robot for its s
 
 ## Calibration
 
-After some very minimal analysis, it seems like an ARIMA model actually learns the dynamics of the brian movement very well. Due to ease of implementation of an ARIMA (not dealing with Fourier Analysis is nice), and the aforementioned queue design, it should work exceedilngly will in a Kalman filter. 
+After some very minimal analysis, it seems like an ARIMA model actually learns the dynamics of the brian movement very well. Due to ease of implementation of an ARIMA (not dealing with Fourier Analysis is nice), and the aforementioned queue design, it should work exceedilngly will in a Kalman filter. Here are some of the ARIMA results:
 
-To have an idea of exactly how we want to control the robot, we must have robust predictions for the brain's movement. To do this, we need a calibration period, where the robot takes a 10 second recording of the brain's movement and creates a function to predict where the brain should be relative to the robot's insert_z at any given point. Given the smoothness of the 
+![ARIMA](pics/arima_10_sec.png)
+
+To have an idea of exactly how we want to control the robot, we must have robust predictions for the brain's movement. To do this, we need a calibration period, where the robot takes a 10 second recording of the brain's movement and creates a function to predict where the brain should be relative to the robot's insert_z at any given point. Given the smoothness of the brains movement, we should be able to use an arima model to predict the location of the brain one the order of 100' of milliseconds out.
+
+Additionally, during the calibration period, we will calculate the pre move location, which is the locaiton 200 microns above the brians highest point in movement.
 
 
 # Polling System
@@ -36,7 +39,9 @@ We keep a queue of the most updated positions of the brain and the robot by havi
 
 ## State Machine
 
-There are 4 states: Dead, Out of Brain Uncalibrated, Out of Brain Calibrated, and In Brain. Note that, outside of the brain, we have not latency 
+There are 4 states: Dead, Out of Brain Uncalibrated, Out of Brain Calibrated, and In Brain. Note that, outside of the brain, we have not latency concerns on movements, so we can move with eventual consistency. Thus keeping track of our state is unncessary since we can simply loop moveing the robot to the location until we receive an successful acknowledgement from the robot.
+
+While in the brain, while using the Kalman filter for control, we have to ensure that the robot can safely exit the brain in the instance of abnormal activity. Thus, we allow transitions from in brain or the out of brain calibrated state to the panic state, which is an intermediary that ensure we get the robot out of the brain and to the origin. From panic, we always transition to the out of brain uncalibrated state, after which we perform our aforementioned calibration swquence, move the robot to the premove locaiton, and return back to out of brain calibrated.
 
 ### Threading considerations wrt moving
 

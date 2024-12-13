@@ -2,10 +2,14 @@ mod interface;
 mod controller;
 mod robot;
 mod arima;
+mod predictor;
 use robot::RobotArm;
 use std::{sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::runtime::Builder;
+use predictor::TaylorQuadraticApproximator;
+use predictor::OraclePredictor;
+use tokio::task::LocalSet;
 
 fn main() {
     println!("Hello, world!");
@@ -16,10 +20,10 @@ fn main() {
     let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(100);
 
     //Creates the robot simulation
-    let robot = Arc::new(Mutex::new(RobotArm::new(0, false, true)));
+    let robot = Arc::new(Mutex::new(RobotArm::new(0, false, false)));
     let robot_clone = Arc::clone(&robot);
     //Creates the controller simulation
-    let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx));
+    let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx, TaylorQuadraticApproximator{}));
     let controller_clone = Arc::clone(&controller);
     //Commanded depth in nanometers
     let commands = vec![
@@ -37,8 +41,8 @@ fn main() {
             .enable_all()
             .build()
             .unwrap();
-        
-        rt.block_on(async {
+        let local = LocalSet::new();
+        local.block_on(&rt,async {
             controller::start(controller, &commands).await
         });
     });
@@ -49,8 +53,8 @@ fn main() {
             .enable_all()
             .build()
             .unwrap();
-            
-        rt.block_on(async move {
+        let local = LocalSet::new();
+        local.block_on(&rt,async move {
             robot::start(distance_rx, state_rx, move_rx, dead_rx,robot).await; 
         });
     });
@@ -60,21 +64,22 @@ fn main() {
     handle_two.join().unwrap();
 
     //Filter indices with true value from controller_clone.outcomes
-    let outcome_indices = controller_clone.outcomes.lock().unwrap().iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i).collect::<Vec<usize>>();
+    let outcome_indices = controller_clone.get_outcomes().iter().enumerate().filter(|(_, &x)| x).map(|(i, _)| i).collect::<Vec<usize>>();
     assert!(outcome_indices.len() == robot_clone.blocking_lock().brain_distances.len());
 
+    let mut abs_distances = Vec::new();
     //Print the commanded vs actual distance
     for (j, i) in outcome_indices.iter().enumerate() {
         let actual_distance = robot_clone.blocking_lock().brain_distances[j];
         let commanded_distance = commands_clone[*i];
+        abs_distances.push(actual_distance.abs_diff(commanded_distance));
         print!("{}, {}, {} ", commanded_distance, actual_distance, *i);
+        println!("");
     }
 
-    for i in robot_clone.blocking_lock().brain_distances.clone() {
-        print!("{}, ", i);
-    }
+    println!("Average absolute distance: {}", abs_distances.iter().sum::<u64>() / abs_distances.len() as u64);
+    println!("Max absolute distance: {}", abs_distances.iter().max().unwrap());
+    println!("Std dev: {}", (abs_distances.iter().map(|x| (*x as f64 - abs_distances.iter().sum::<u64>() as f64 / abs_distances.len() as f64).powi(2)).sum::<f64>() / abs_distances.len() as f64).sqrt());
+    println!("Num successes: {}", outcome_indices.len());
 
-    for i in controller_clone.outcomes.lock().unwrap().clone() {
-        print!("{}, ", i);
-    }
 }
