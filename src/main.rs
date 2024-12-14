@@ -8,9 +8,10 @@ use std::{sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tokio::runtime::Builder;
-use predictor::TaylorQuadraticApproximator;
-use predictor::QuadraticRegression;
-use predictor::OraclePredictor;
+
+use predictor::taylor_approx::TaylorQuadraticApproximator;
+use predictor::quadratic_regression::QuadraticRegression;
+use predictor::oracle_approx::OraclePredictor;
 use tokio::task::LocalSet;
 
 fn main() {
@@ -22,7 +23,7 @@ fn main() {
     let (dead_tx, dead_rx) = tokio::sync::mpsc::channel(100);
 
     //Creates the robot simulation
-    let robot = Arc::new(Mutex::new(RobotArm::new(0, true, false)));
+    let robot = Arc::new(Mutex::new(RobotArm::new(0, false, true)));
     let robot_clone = Arc::clone(&robot);
     //Creates the controller simulation
     let controller = Arc::new(controller::Controller::new(distance_tx, state_tx, move_tx, dead_tx, QuadraticRegression{}));

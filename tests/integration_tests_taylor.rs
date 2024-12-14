@@ -5,7 +5,7 @@ use std::{sync::Arc, thread};
 use tokio::sync::Mutex;
 use tokio::runtime::Builder;
 use tokio::task::LocalSet;
-use neuralink_final::predictor::TaylorQuadraticApproximator;
+use neuralink_final::predictor::taylor_approx::TaylorQuadraticApproximator;
 use tokio::time::Instant;
 
 const PRECISION: u64 = 300_000;
